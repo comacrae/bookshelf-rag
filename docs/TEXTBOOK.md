@@ -54,11 +54,34 @@ With retrieval, the system first searches the stored pieces of Pro Git for ones 
 
 Write down a question you could ask about one of your books where you are confident a plain chat model would get the page wrong or invent a detail. Then write down what text from the book would have to be in the prompt for the model to answer correctly. Count roughly how many words that text is. That count is your first intuition for chunk size (Chapter 2).
 
+Excerpt from pro git p 437: 
+
+The packfile is a single file containing the
+
+contents of all the objects that were removed from your filesystem. The index is a file that contains
+
+offsets into that packfile so you can quickly seek to a specific object. What is cool is that although
+
+the objects on disk before you ran the gc command were collectively about 15K in size, the new
+
+packfile is only 7K. You’ve cut your disk usage by half by packing your objects.
+
+How does Git do this? When Git packs objects, it looks for files that are named and sized similarly,
+
+and stores just the deltas from one version of the file to the next. You can look into the packfile and
+
+see what Git did to save space.   
+  
+So a chunk is maybe 100 words?
+
 ### 1.5 Check your understanding
 
 - Why does giving the model the text in the prompt reduce invented details, but not eliminate them?
+  - We need to find the correct text to give the model
 - Retrieval finds text; the model generates an answer. Which one is responsible when the final answer is wrong because the right page was never found?
+  - retrieval
 - What would you need to record, at the moment you split the book into pieces, so that a citation can later say which page a piece came from?
+  - the page each peice was found in
 
 ### 1.6 Build: project setup and the spike (M0)
 
@@ -487,7 +510,7 @@ Validation: `[2]`, `[3]`, `[4]` are in range. `[7]` is not; the model either hal
 
 ### 8.6 Toy problem
 
-Write `validateCitations` in your head: input is the answer text, the list of valid chunk numbers, and the list of valid web ids; output is the list of invalid tokens. Then list three answer strings that would trip a naive regex and say how you'd handle each: a citation inside a code span like `` `arr[0]` ``, a range like `[2-4]`, and `[w1]` when no web results were sent.
+Write `validateCitations` in your head: input is the answer text, the list of valid chunk numbers, and the list of valid web ids; output is the list of invalid tokens. Then list three answer strings that would trip a naive regex and say how you'd handle each: a citation inside a code span like ``arr[0]``, a range like `[2-4]`, and `[w1]` when no web results were sent.
 
 ### 8.7 Check your understanding
 
@@ -817,6 +840,7 @@ The lesson: chunk 1's citation says page 7 but its fresh content is on page 8.
 **10.5.** `messages` at start of turn 3: [H, A, H, A]. (a) no reset: attempts restored from turn 2's final value, so the loop has fewer tries than intended or none; (b) route passes `attempts: 0` in the input: overwrite reducer sets it to 0, grade then counts 1, 2, 3; (c) `rewrite` returns `attempts: 0`: works but `rewrite` now writes a field `grade` owns, and on retries it would reset the count every loop, which breaks termination. (b) is the one.
 
 **12.5.**
+
 ```
 {"meta":{"source":"books","chunks":[{"n":1,"book":"pro-git-2e","page":94},{"n":2,"book":"pro-git-2e","page":95}],"web":[]}}
 {"token":"Rebase replays "}
@@ -824,6 +848,7 @@ The lesson: chunk 1's citation says page 7 but its fresh content is on page 8.
 {"token":"It rewrites hashes [2]."}
 {"done":true,"invalid":["7"]}
 ```
+
 (assuming the model also emitted a `[7]` somewhere that was stripped). The client must buffer partial lines: keep the trailing fragment after the last newline and prepend it to the next chunk before parsing.
 
 **13.6.** Hits 30, misses 10. Approved hits 27 (correct approve), rejected hits 3 (needless retry). Approved misses 5 (wrong approve), rejected misses 5 (correct reject). Wrong approvals at 5 of 10 misses is the problem; tighten the grade prompt's "partial mentions are not enough" line first, since those five will produce confident wrong answers.
