@@ -2,4 +2,5 @@
 .claude
 .env
 spike/
-evals/raw
+library/evals/raw
+books/
