@@ -1,5 +1,11 @@
 create extension if not exists vector;
 
+create table if not exists schema_migrations
+(
+    name text not null,
+    applied_at timestamptz not null default now()
+)
+
 create table if not exists books -- one row per book
 (
     id varchar(64) primary key, -- slug
@@ -39,7 +45,7 @@ create table if not exists requests -- one row per question
     invalid_citations int not null default 0, -- how many citations in the returned answer are NOT grounded 
     source text not null check (source in ('books','web','none')), -- books, web, or none, meaning no valid answer was returned,
     chat_model text not null,
-    status text not null check (source in ('ok','error')), -- ok or the error that occured during the request
+    status text not null check (status in ('ok','error')), -- ok or the error that occured during the request
     error_message text,
     created_at timestamptz not null default now() -- when was the request initially created
 );
