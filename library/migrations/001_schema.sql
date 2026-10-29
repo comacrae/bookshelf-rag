@@ -1,11 +1,5 @@
 create extension if not exists vector;
 
-create table if not exists schema_migrations
-(
-    name text not null primary key,
-    applied_at timestamptz not null default now()
-);
-
 create table if not exists books -- one row per book
 (
     id varchar(64) primary key, -- slug
