@@ -732,7 +732,19 @@ The bottom-left cell is the dangerous one: the grader approved passages that don
 
 Every `requests` row has tokens and milliseconds. The runner reports median and 95th-percentile latency (p95 is what a user who got unlucky experienced) and dollars per question from your provider's price sheet. Put the prices in the runner as constants with the date you looked them up. These numbers go in the README with no adjectives attached.
 
-### 13.5 Worked example
+Two of those numbers need a word. Total latency is how long the answer took; time to first token is how long the user stared at nothing. In a streamed app the second is the one people feel, so the `requests` row stores both. And the row records which chat model produced it, because a latency or cost figure means nothing once you've switched models and can't tell old rows from new.
+
+### 13.5 One row per question, many rows per step
+
+A `requests` row answers "what happened to this question": its source, its attempts, its total tokens and time. It can't answer "what happened inside it". Which rewrite failed? What did the grader say the second time? Was the slow part retrieval or the answer? Those facts don't happen once per question. They happen once per node run, and a question that retried three times has ten node runs.
+
+That is the general rule of relational modeling. A fact that occurs once per thing is a column on that thing's table. A fact that occurs many times per thing goes in a child table, one row per occurrence, with a foreign key back to the parent. You could try to cram ten steps into the parent as `rewrite_1`, `rewrite_2`, `rewrite_3` columns, or one big JSON blob, but the columns break the day `MAX_ATTEMPTS` changes, and the blob can't be queried for "median grade latency" without unpacking it in every query. A `request_steps` table with `request_id`, a `seq` for order, the node name and the attempt number answers both kinds of question with ordinary SQL: the steps of one request in order, or one node's numbers across every request.
+
+Why persist steps at all, when `streamMode: "updates"` already prints them? Because printed logs vanish, and two uses need them later. The UI can show a reader how the answer was reached: three rewrites, three rejections, then an abstention. That turns the retry loop and the grader from a claim in the README into something a reviewer watches happen. And error analysis gets a record: when an answer is wrong, you can read the exact rewritten query and grade reason that led to it instead of trying to reproduce the run.
+
+Hosted tracing services, LangSmith being the one built for LangGraph, record all this automatically: every node, every model call, every prompt, with a viewer already built. That's the right choice when the goal is operating an agent. It costs you an external dependency, data leaving your database, and the understanding you'd get from deciding what a step is and which fields matter. Here the goal is learning, and the table is small, so the project writes its own trace. The trade-off is worth a sentence in the README, with the alternative named.
+
+### 13.6 Worked example
 
 Thirty questions, loop on. Retrieval hit 24; missed 6. Grader said relevant for 21 of the 24 hits and for 2 of the 6 misses.
 
@@ -743,21 +755,22 @@ Thirty questions, loop on. Retrieval hit 24; missed 6. Grader said relevant for 
 
 Three needless retries, two wrong approvals. The two wrong approvals are the ones to read: open those questions and see what the grader was looking at. If the passages are plausibly related but don't answer the question, the grade prompt's "partial mentions are not enough" line needs to be stronger.
 
-### 13.6 Toy problem
+### 13.7 Toy problem
 
 Forty questions. Hits: 30. Grader approved 27 hits and 5 misses. Fill in the 2×2, name the two off-diagonal counts, and say which prompt change you'd try first and why.
 
-### 13.7 Check your understanding
+### 13.8 Check your understanding
 
 - Why does the loop-on eval disable the web fallback?
 - Loop on raised recall from 76% to 80% and doubled cost per question. Is that worth it? What would you need to know to decide?
 - Why is p95 latency reported alongside the median?
+- `attempts` is a column on `requests`, but each attempt's grade reason lives in `request_steps`. Why the difference?
 
-### 13.8 Build: the runner extension and the agent rows (M4, part 7)
+### 13.9 Build: the runner extension and the agent rows (M4, part 7)
 
-`BUILD-GUIDE.md` 5.7.
+`BUILD-GUIDE.md` 5.7. After the ship line, 5.9 and 5.10 add the `request_steps` migration, the capture in the route, and the step timeline.
 
-Checkpoint: loop-on and loop-off rows; the 2×2 and a sentence about it in `evals/notes.md`; median latency and $/question filled in.
+Checkpoint: loop-on and loop-off rows; the 2×2 and a sentence about it in `evals/notes.md`; median latency and $/question filled in. Later, "purple elevator tax" with the fallback off shows three rewrite, retrieve, grade cycles and an abstaining answer in its timeline.
 
 ---
 
@@ -851,7 +864,7 @@ The lesson: chunk 1's citation says page 7 but its fresh content is on page 8.
 
 (assuming the model also emitted a `[7]` somewhere that was stripped). The client must buffer partial lines: keep the trailing fragment after the last newline and prepend it to the next chunk before parsing.
 
-**13.6.** Hits 30, misses 10. Approved hits 27 (correct approve), rejected hits 3 (needless retry). Approved misses 5 (wrong approve), rejected misses 5 (correct reject). Wrong approvals at 5 of 10 misses is the problem; tighten the grade prompt's "partial mentions are not enough" line first, since those five will produce confident wrong answers.
+**13.7.** Hits 30, misses 10. Approved hits 27 (correct approve), rejected hits 3 (needless retry). Approved misses 5 (wrong approve), rejected misses 5 (correct reject). Wrong approvals at 5 of 10 misses is the problem; tighten the grade prompt's "partial mentions are not enough" line first, since those five will produce confident wrong answers.
 
 # Appendix B. Glossary
 
@@ -872,5 +885,6 @@ Reducer: the function that combines a node's returned field with the existing va
 RRF: reciprocal rank fusion, `Σ 1/(k + rank)`.
 Structured output: a model response constrained to a schema.
 Thread id: the key a checkpointer uses to find a conversation's state.
+Time to first token (TTFT): time from the request to the first streamed token; the latency a user feels.
 Token: the unit models read and bill in; roughly three-quarters of a word.
 tsvector / tsquery: Postgres full-text search document and query types.

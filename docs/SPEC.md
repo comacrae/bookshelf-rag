@@ -91,7 +91,7 @@ TypeScript. Next.js App Router. Postgres 16 with pgvector on Supabase. LangGraph
 | `src/agent/graph.ts` | The LangGraph `StateGraph`: nodes, edges, checkpointer. |
 | `src/agent/nodes.ts` | `rewrite`, `retrieve`, `grade`, `webSearch`, `answer`. Each is a plain async function over state. |
 | `src/citations.ts` | Parses `[n]` and `[wN]` citations and rejects any not in the retrieved set. |
-| `app/api/chat/route.ts` | Invokes the graph with a `thread_id`, streams the answer node's tokens, records cost and latency. |
+| `app/api/chat/route.ts` | Invokes the graph with a `thread_id`, streams the answer node's tokens, records cost and latency, and records one step row per node run. |
 | `app/c/[id]/page.tsx` | Question box, streamed answer, citation links that open the cited chunk or URL. |
 | `evals/` | Versioned question set, runner, results table, error-analysis notes. |
 
@@ -138,7 +138,9 @@ POST /api/chat  { conversationId, question }
   → answer    : streamed. Chunks numbered [1]–[5]; web results [w1]–[w3]. The prompt says which source
                 it is answering from and, for web, that the answer is not from the books.
   → on stream end: validateCitations; strip invalid; log
-  → route records: attempts, source, input/output tokens per node, wall time
+  → route records: attempts, source, input/output tokens per node, wall time, time to first token, chat model
+  → route records: one request_steps row per node update, in order (node, attempt, detail, tokens, ms),
+                   written with the requests row since each step needs its request id
   → client renders answer; [n] opens the chunk panel; [wN] opens the URL; a badge shows "from the books" / "from the web" / "no answer found"
 ```
 
@@ -180,12 +182,36 @@ CREATE TABLE requests (                -- one row per answered question, for cos
   output_tokens   int  NOT NULL,
   web_calls       int  NOT NULL DEFAULT 0,
   latency_ms      int  NOT NULL,
+  ttft_ms         int  NOT NULL,       -- time to first streamed token; what a user actually feels
+  chat_model      text NOT NULL,       -- keeps rows comparable across model changes
   invalid_citations int NOT NULL DEFAULT 0,
   created_at      timestamptz NOT NULL DEFAULT now()
 );
 ```
 
 Migrations are numbered SQL files in `migrations/`, applied in order by `scripts/migrate.ts`. An applied migration is never edited; changes go in a new file.
+
+The tables above are `001_schema.sql`. One more table arrives later, as `004_request_steps.sql` in M4 (002 is the book rows, 003 the HNSW index). It is not in 001 on purpose: its columns are designed after looking at real `streamMode: "updates"` events, and since 001 will already be applied by then, it has to be a new file.
+
+The rule for what goes where: a fact that happens once per question is a column on `requests`; a fact that happens several times per question (once per node run, once per attempt) is a row in a child table with a `request_id` foreign key. Each node execution is one row:
+
+```sql
+-- migrations/004_request_steps.sql. A starting point: finalize the columns after inspecting the update events.
+CREATE TABLE request_steps (           -- one row per node execution, so the UI can show how an answer was reached
+  id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  request_id    bigint NOT NULL REFERENCES requests(id),
+  seq           int  NOT NULL,         -- order within the request, from 1
+  node          text NOT NULL CHECK (node IN ('rewrite','retrieve','grade','webSearch','answer')),
+  attempt       int  NOT NULL,         -- the retry cycle this step belongs to
+  detail        jsonb NOT NULL DEFAULT '{}',  -- rewritten query, retrieved chunk ids, grade {relevant, reason}, web URLs
+  input_tokens  int  NOT NULL DEFAULT 0,
+  output_tokens int  NOT NULL DEFAULT 0,
+  latency_ms    int  NOT NULL,
+  UNIQUE (request_id, seq)             -- also serves "all steps for a request, in order"
+);
+```
+
+This is an internal table rather than a hosted tracing service such as LangSmith, by choice: writing the trace yourself is part of what the project teaches.
 
 ## 6. Build order
 
@@ -257,7 +283,7 @@ Build `src/agent/graph.ts` as described in section 4. Add nodes one at a time. A
 - `webSearch` makes one provider call, keeps the top 3, and stores them in `webResults`. It is reached only after `MAX_ATTEMPTS` and only when `WEB_FALLBACK=on`.
 - `src/citations.ts` exports `validateCitations(text, chunkIds, webIds)`, which returns the invalid tokens. One unit test: an id outside either set is flagged. The route strips invalid citations and counts them in `requests`.
 - The checkpointer is `PostgresSaver` from `@langchain/langgraph-checkpoint-postgres`, with `thread_id` set to the conversation id. Inspect what it writes per step and note it in `docs/graph.md`.
-- The route handler invokes the graph with the `thread_id` and `{ question, attempts: 0 }` as input, streams the `answer` node's tokens, sends source metadata (chunk ids, URLs, `source`) as the first frame, and writes a `requests` row when the stream ends. The eval runner passes the same input shape.
+- The route handler invokes the graph with the `thread_id` and `{ question, attempts: 0 }` as input, streams the `answer` node's tokens, sends source metadata (chunk ids, URLs, `source`) as the first frame, and writes a `requests` row when the stream ends, including `ttft_ms` (request start to first answer token) and `chat_model`. The eval runner passes the same input shape.
 - The UI has a question box, a streamed answer, a badge for books / web / none, `[n]` links that open a panel with book, page and chunk text, and `[wN]` links that open the URL. The conversation id lives in the URL so a refresh keeps history.
 - Add eval rows for `--method hybrid --loop on --web off` (the full graph) and `--loop off` with the same method. The difference between those two recall@5 numbers is the measured value of the retry loop. Record grader accuracy, abstention and false-abstain.
 - Deploy: a Supabase project with pgvector, ingest run once from the laptop, Vercel on push. `WEB_FALLBACK=on` in production and `off` in eval. `.env.example` documents every variable.
@@ -272,6 +298,16 @@ Accept when all of the following hold:
 - An eval question asked on the live URL streams visibly before it completes, and every citation link resolves.
 
 This is the ship line. Put the link in the README and in applications.
+
+### M4 follow-on: step timeline
+
+Built right after the ship line and before any section 8 stretch item. It never delays M2 or M3; the eval numbers come first. The point is to make the retry loop and the grader visible under each answer, which few portfolio agents show, and to give error analysis a per-step record.
+
+- Print a few real `streamMode: "updates"` events (normal question, retried question, web fallback) and finalize the `request_steps` columns from section 5 against them. Then add `migrations/004_request_steps.sql`.
+- Capture: the route already iterates the graph's events. Each node update becomes one step row with `seq`, `node`, `attempt`, a small `detail` object, the tokens of that node's model calls, and its wall time. Steps are held in memory and inserted after the `requests` row, in the same transaction, using its returned id.
+- UI: under each answer, a collapsed, read-only timeline with one line per step: node, attempt, a one-line summary from `detail` ("rewrote to …", "5 chunks", "not relevant: …", "3 web results"), and milliseconds. No graph rendering. A refresh shows the same timeline, read from `request_steps`.
+
+Accept when "purple elevator tax" with `WEB_FALLBACK=off` shows a timeline of three rewrite → retrieve → grade cycles (attempts 1, 2, 3, each grade "not relevant") followed by an abstaining `answer`, and `SELECT node, attempt FROM request_steps WHERE request_id = $1 ORDER BY seq` returns the same ten rows.
 
 ### M5: README and write-up
 
@@ -335,7 +371,7 @@ Only after M5, in order of value:
 │   ├── LICENSES.md
 │   ├── eloquent-js-4e.pdf
 │   └── pro-git-2e.pdf
-├── migrations/              001_schema.sql, 002_hnsw.sql, ...
+├── migrations/              001_schema.sql, 002_books.sql, 003_hnsw.sql, 004_request_steps.sql
 ├── scripts/
 │   ├── migrate.ts
 │   └── ingest.ts

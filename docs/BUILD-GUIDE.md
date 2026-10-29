@@ -817,7 +817,7 @@ export async function POST(req: Request) {
 
   const body = new ReadableStream({
     async start(controller) {
-      let meta: any = null, text = "", attempts = 0, inTok = 0, outTok = 0;
+      let meta: any = null, text = "", attempts = 0, inTok = 0, outTok = 0, ttft = 0;
       for await (const ev of graph.streamEvents({ question, attempts: 0 }, cfg)) {   // attempts reset per turn; see SPEC §4
         if (ev.event === "on_chain_end" && ev.name === "grade") attempts = ev.data.output.attempts;
         if (ev.event === "on_chain_start" && ev.name === "answer") {
@@ -829,6 +829,7 @@ export async function POST(req: Request) {
         }
         if (ev.event === "on_chat_model_stream" && ev.metadata?.langgraph_node === "answer") {
           const piece = String(ev.data.chunk.content ?? "");
+          if (!ttft) ttft = Date.now() - t0;
           text += piece;
           controller.enqueue(enc.encode(JSON.stringify({ token: piece }) + "\n"));
         }
@@ -838,9 +839,9 @@ export async function POST(req: Request) {
       controller.enqueue(enc.encode(JSON.stringify({ done: true, invalid }) + "\n"));
       controller.close();
       await pool.query(
-        `INSERT INTO requests (conversation_id, question, source, attempts, input_tokens, output_tokens, web_calls, latency_ms, invalid_citations)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-        [conversationId, question, meta.source, attempts, inTok, outTok, meta.source === "web" ? 1 : 0, Date.now() - t0, invalid.length]);
+        `INSERT INTO requests (conversation_id, question, source, attempts, input_tokens, output_tokens, web_calls, latency_ms, ttft_ms, chat_model, invalid_citations)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        [conversationId, question, meta.source, attempts, inTok, outTok, meta.source === "web" ? 1 : 0, Date.now() - t0, ttft, process.env.CHAT_MODEL, invalid.length]);
     },
   });
   return new Response(body, { headers: { "Content-Type": "application/x-ndjson" } });
@@ -849,7 +850,7 @@ export async function POST(req: Request) {
 
 The exact event names and the `usage_metadata` shape are the parts most likely to differ by version. Log every event once to see what you get, then filter.
 
-Checkpoint: `curl -N -X POST localhost:3000/api/chat -d '{"conversationId":"c1","question":"What is a closure?"}'` prints a meta line, then token lines one at a time, then a done line. A `requests` row appears with non-zero tokens and latency. Commit: `M4 streaming route with citation validation`.
+Checkpoint: `curl -N -X POST localhost:3000/api/chat -d '{"conversationId":"c1","question":"What is a closure?"}'` prints a meta line, then token lines one at a time, then a done line. A `requests` row appears with non-zero tokens and latency, a `ttft_ms` well below `latency_ms`, and your `chat_model`. Commit: `M4 streaming route with citation validation`.
 
 ### 5.6 The UI
 
@@ -887,6 +888,87 @@ Checkpoint: `results.md` has loop-on and loop-off rows with the new columns fill
 If the first request on Vercel times out, the cause is almost always the checkpointer's `setup()` running on a cold start plus a three-attempt loop. Run `setup()` once from your laptop against the production database and remove it from the request path.
 
 Checkpoint: the live URL passes all four hand checks, and a `requests` row lands in Supabase for each. Commit: `M4 deployed`, and put the URL at the top of `README.md` right now, before anything else is written. This is the ship line.
+
+### 5.9 Step rows: migration 004 and capture
+
+Do this after the ship line, not before. It is the follow-on in the spec's M4 section, and it comes before any stretch item.
+
+First, look at what you're about to store. Run `spike/run-graph.ts` three times: a normal question, "purple elevator tax" with `WEB_FALLBACK=off`, and the same with it on. Each printed update is one future row. Decide what goes in `detail` for each node; keep it to ids and short strings (the rewritten query, chunk ids, the grade's `relevant` and `reason`, web URLs), never chunk text, which is already in `chunks`.
+
+Create `migrations/004_request_steps.sql` with the `request_steps` table from `SPEC.md` section 5, adjusted for what you saw. Don't touch 001; it's applied.
+
+Checkpoint: `npm run migrate` prints `applied 004_request_steps.sql`. `psql $DATABASE_URL -c "\d request_steps"` shows the foreign key to `requests`.
+
+Now capture. The route's `streamEvents` loop already sees every node finish: the `on_chain_end` event for a node carries the same update that `streamMode: "updates"` prints. Add to the loop in `app/api/chat/route.ts`:
+
+```ts
+const NODES = new Set(["rewrite", "retrieve", "grade", "webSearch", "answer"]);
+const steps: any[] = [], started = new Map<string, number>();
+let grades = 0, stepIn = 0, stepOut = 0;
+
+// inside the for-await loop:
+if (ev.event === "on_chain_start" && NODES.has(ev.name)) started.set(ev.run_id, Date.now());
+if (ev.event === "on_chat_model_end") {
+  stepIn += ev.data.output?.usage_metadata?.input_tokens ?? 0;
+  stepOut += ev.data.output?.usage_metadata?.output_tokens ?? 0;
+}
+if (ev.event === "on_chain_end" && NODES.has(ev.name)) {
+  const out = ev.data.output;
+  if (ev.name === "grade") grades = out.attempts;
+  steps.push({
+    seq: steps.length + 1, node: ev.name,
+    attempt: ev.name === "rewrite" || ev.name === "retrieve" ? grades + 1 : grades,   // the cycle this step belongs to
+    detail: detailOf(ev.name, out), inTok: stepIn, outTok: stepOut,
+    ms: Date.now() - started.get(ev.run_id)!,
+  });
+  stepIn = stepOut = 0;
+}
+```
+
+`detailOf` is a small switch: `{ rewritten }` for rewrite, `{ chunkIds }` for retrieve, `{ relevant, reason }` for grade, `{ urls }` for webSearch, `{ source }` for answer. If you see a node's end event twice, also require `ev.metadata?.langgraph_node === ev.name`.
+
+Then write the steps with the request. A step needs the request's id, so change the `requests` insert to end in `RETURNING id`, and do both inserts on one client in one transaction:
+
+```ts
+const client = await pool.connect();
+try {
+  await client.query("BEGIN");
+  const { rows } = await client.query(`INSERT INTO requests (...) VALUES (...) RETURNING id`, [/* as before */]);
+  for (const st of steps)
+    await client.query(
+      `INSERT INTO request_steps (request_id, seq, node, attempt, detail, input_tokens, output_tokens, latency_ms)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [rows[0].id, st.seq, st.node, st.attempt, st.detail, st.inTok, st.outTok, st.ms]);
+  await client.query("COMMIT");
+} catch (e) { await client.query("ROLLBACK"); throw e; } finally { client.release(); }
+```
+
+Also add `steps` to the `done` frame so the client has them without a second request.
+
+Checkpoint: ask "purple elevator tax" with `WEB_FALLBACK=off` through `curl`, then:
+
+```sql
+SELECT seq, node, attempt, detail->>'relevant' AS relevant, latency_ms
+FROM request_steps WHERE request_id = (SELECT max(id) FROM requests) ORDER BY seq;
+```
+
+Ten rows: rewrite, retrieve, grade with attempt 1, the same with 2 and 3, each grade `false`, then `answer` with `{"source":"none"}`. The per-step tokens add up to the request's tokens. Commit: `M4 request steps captured`.
+
+### 5.10 The step timeline
+
+Under each answer in `app/c/[id]/page.tsx`, add a collapsed "How this answer was reached" toggle. Open, it is a plain list with one line per step: node, attempt, a one-line summary built from `detail`, and milliseconds.
+
+```
+1  rewrite    #1  "Is there a tax on purple elevators?"     410 ms
+2  retrieve   #1  5 chunks                                    90 ms
+3  grade      #1  not relevant: passages are about git tags  620 ms
+...
+10 answer     #3  no answer found                            380 ms
+```
+
+Read-only, no graph drawing, no library. Live, the steps come from the `done` frame. On refresh, extend the history `GET` to also return each turn's steps: select the conversation's `requests` rows by `created_at` with their `request_steps` by `seq`, and pair the nth request with the nth answer.
+
+Checkpoint: in the browser, "purple elevator tax" with `WEB_FALLBACK=off` shows three rewrite → retrieve → grade cycles and then an abstaining answer; a normal question shows four lines; a refresh shows the same timelines. Commit: `M4 step timeline`.
 
 ## Chapter 6: the README (M5)
 
@@ -952,6 +1034,8 @@ M4 streaming route with citation validation
 M4 chat UI
 M4 loop on vs off: NN% → NN%
 M4 deployed
+M4 request steps captured
+M4 step timeline
 M5 README
 M6 week 1 ... week 4
 ```
