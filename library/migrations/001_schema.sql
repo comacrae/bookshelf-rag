@@ -2,9 +2,9 @@ create extension if not exists vector;
 
 create table if not exists schema_migrations
 (
-    name text not null,
+    name text not null primary key,
     applied_at timestamptz not null default now()
-)
+);
 
 create table if not exists books -- one row per book
 (
@@ -29,7 +29,7 @@ create table if not exists chunks -- one row per chunk
     unique(book_id,chunk_index)
 );
 
-create index chunks_tsv_idx on chunks using gin (tsv); -- generalized inverted index (like a keyword index in back of a book)
+create index if not exists chunks_tsv_idx on chunks using gin (tsv); -- generalized inverted index (like a keyword index in back of a book)
 
 create table if not exists requests -- one row per question
 (
