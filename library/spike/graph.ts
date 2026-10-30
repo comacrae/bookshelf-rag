@@ -48,12 +48,41 @@ The guide's sample uses top-level await, which fails under tsx just like it did 
 */
 
 // state is an object that marks the state of the fields acted upon by nodes in the graph
-const ConversationState = Annotation.Root({
+const SpikeState = Annotation.Root({
     count: Annotation<number>({reducer: (_curr, update) => update, default: () => 0}),
     log: Annotation<string[]>({reducer: (curr, update) => curr.concat(update), default: ()=>[]})
 });
 
 // a node is an async function that ingests and modifies state and returns the change to be ingested by the reducer
-const node = async (state: typeof ConversationState.State) => {
+const bump = async (state: typeof SpikeState.State) => {
     return {count: state.count+1, log: [`bump to ${state.count+1}`]};
 };
+
+// router reads state and guides path by returning name of next node to visit or END to stop
+
+const nextStep = (state: typeof SpikeState.State) => {
+    if(state.count >= 3)
+        return END;
+    else
+        return "bump";
+};
+
+// checkpointer
+const dbUrl = process.env.DATABASE_URL;
+if(dbUrl === undefined)
+    throw new Error('db url env var undefined');
+const checkpointer = PostgresSaver.fromConnString(dbUrl);
+
+await checkpointer.setup(); //create tables if dne
+
+await checkpointer.end() // closes its own pool so process will exit
+
+// build graph 
+
+const graph = new StateGraph(SpikeState)
+    .addNode("bump", bump)
+    .addEdge(START, "bump")
+    // maps whatever the router returned to which node runs next
+    // so this says after bump runs, call next step, and depedning on what it returns, loop again or stop
+    .addConditionalEdges("bump", nextStep, {node: "bump", [END]: END}) 
+    .compile({checkpointer});
