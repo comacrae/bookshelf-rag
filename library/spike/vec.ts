@@ -55,7 +55,6 @@ const sentences = [
         throw new Error('Embedding dim undefined in .env');
 
     const model = new OpenAIEmbeddings({apiKey:process.env.OPENAI_API_KEY, model: process.env.EMBEDDING_MODEL});
-    const client = await pool.connect();
 
     //try to do the following: 
 
@@ -64,7 +63,8 @@ const sentences = [
     // convert the query
       const queryEmbedding = await model.embedQuery(query);
 
-    
+    const client = await pool.connect();
+
     try{
       // create the temporary table
       await client.query(`
@@ -94,7 +94,7 @@ const sentences = [
       
     }finally{
       // finally tear down the table and release the pool;
-      await client.query(`drop table tmp_vecs;`);
+      await client.query(`drop table if exists tmp_vecs;`);
       client.release();
     }
     
