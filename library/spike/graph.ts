@@ -73,10 +73,6 @@ if(dbUrl === undefined)
     throw new Error('db url env var undefined');
 const checkpointer = PostgresSaver.fromConnString(dbUrl);
 
-await checkpointer.setup(); //create tables if dne
-
-await checkpointer.end() // closes its own pool so process will exit
-
 // build graph 
 
 const graph = new StateGraph(SpikeState)
@@ -84,5 +80,25 @@ const graph = new StateGraph(SpikeState)
     .addEdge(START, "bump")
     // maps whatever the router returned to which node runs next
     // so this says after bump runs, call next step, and depedning on what it returns, loop again or stop
-    .addConditionalEdges("bump", nextStep, {node: "bump", [END]: END}) 
+    .addConditionalEdges("bump", nextStep, {"bump": "bump", [END]: END}) 
     .compile({checkpointer});
+
+
+const invoke = async (threadId:string) => {
+    const config = {configurable: {thread_id: threadId}};
+    await checkpointer.setup(); //create tables if dne
+    const result = await graph.invoke({}, config); // {} means no new input so use saved state
+    console.log(`Invoked threadId: ${threadId} \n Result: ${result}`);
+}
+
+
+async function main(){
+    await invoke('thread-1');
+    // expect to see ({count: 3, ['bump to 1', 'bump to 2', 'bump to 3']})
+    await invoke('thread-1');
+    // expect to see ({count: 4, ['bump to 1', 'bump to 2', 'bump to 3','bump to 4']})
+    await invoke('thread-2');
+    // expect to see ({count: 3, ['bump to 1', 'bump to 2', 'bump to 3']})
+}
+
+main().finally(() => checkpointer.end() ); // closes its own pool so process will exit
