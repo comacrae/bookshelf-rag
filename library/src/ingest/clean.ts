@@ -1,5 +1,5 @@
 
-import { Page } from "../chunker";
+import { Page } from "./chunker";
 export function removeHyphens(input:string): string{
     return input.replace(/\-\n/g,"");
 }
