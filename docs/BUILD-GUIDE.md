@@ -286,7 +286,7 @@ Checkpoint: `npm run migrate` prints `applied 003_add_page_end.sql`, and `\d chu
 
 ### 2.1 The chunker
 
-This is the first piece you type by hand. Create `src/chunker.ts`:
+This is the first piece you type by hand. PDF extraction leaves no blank lines on any page of the four books, and every `\n` is only a wrapped line, so chunks are built from sentences rather than paragraphs. Create `src/ingest/chunker.ts`:
 
 ```ts
 import { getEncoding } from "js-tiktoken";
@@ -299,20 +299,21 @@ export type ChunkOpts = { targetTokens: number; overlapTokens: number };
 const countTokens = (s: string) => enc.encode(s).length;
 
 export function chunk(pages: Page[], opts: ChunkOpts): Chunk[] {
-  // 1. Turn pages into paragraphs, each tagged with the page it starts on.
-  //    Split on blank lines; if a page has no blank lines, treat the page as one paragraph.
-  // 2. Walk paragraphs, accumulating into a buffer until adding the next one would exceed targetTokens.
-  //    When it would, emit the buffer as a chunk whose page is the page of the buffer's first paragraph
-  //    and whose pageEnd is the page of its last paragraph.
-  // 3. A single paragraph bigger than targetTokens is split by sentence until each piece fits.
+  // 1. Turn pages into sentences, each tagged with its page. A sentence ends at . ! or ? followed by whitespace.
+  //    A \n is whitespace and doesn't end anything by itself.
+  // 2. A run of text bigger than targetTokens with no sentence endings (code, figure labels) is split by word
+  //    until each piece fits.
+  // 3. Walk the pieces, accumulating into a buffer until adding the next one would exceed targetTokens.
+  //    When it would, emit the buffer as a chunk whose page is the page of the buffer's first piece
+  //    and whose pageEnd is the page of its last piece.
   // 4. Overlap: when starting a new chunk, seed the buffer with the last overlapTokens worth of text
   //    from the previous chunk, tagged with the page where that text starts. If the previous chunk's
-  //    last paragraph is shorter than overlapTokens, that can be an earlier paragraph's page.
+  //    last piece is shorter than overlapTokens, that can be an earlier piece's page.
   // 5. Return chunks numbered 0..n-1.
 }
 ```
 
-Write it. The comments are the algorithm; the code is yours. Keep it under 80 lines. The hard case is step 4: the overlap text comes from the end of the previous chunk, and its page tag must be the page where that text actually lives, which may differ from the new chunk's first fresh paragraph. Decide which page the chunk reports (the spec says: the page of the chunk's first character, which is the overlap's page) and make the test enforce it. `pageEnd` is the page of the chunk's last character, so that chunk reports both pages.
+Write it. The comments are the algorithm; the code is yours. Keep it under 80 lines. The hard case is step 4: the overlap text comes from the end of the previous chunk, and its page tag must be the page where that text actually lives, which may differ from the new chunk's first fresh sentence. Decide which page the chunk reports (the spec says: the page of the chunk's first character, which is the overlap's page) and make the test enforce it. `pageEnd` is the page of the chunk's last character, so that chunk reports both pages.
 
 ### 2.2 Chunker tests
 
@@ -321,17 +322,18 @@ Create `tests/chunker.test.ts`:
 ```ts
 import { describe, it, expect } from "vitest";
 import { getEncoding } from "js-tiktoken";
-import { chunk } from "../src/chunker";
+import { chunk } from "../src/ingest/chunker";
 
 const enc = getEncoding("cl100k_base");
 const countTokens = (s: string) => enc.encode(s).length;
 
-// Words with an index under 100 are 4 tokens each, so para(n, 30) is 120 tokens and para(n, 80) is 320.
-const para = (n: number, words = 60) => Array.from({ length: words }, (_, i) => `w${n}_${i}`).join(" ");
+// Words with an index under 100 are 4 tokens each, so words(n, 30) is 120 tokens and words(n, 80) is 320.
+// There's no punctuation, so one call is one unbroken run of text. Add "." to make it a sentence.
+const words = (n: number, count = 60) => Array.from({ length: count }, (_, i) => `w${n}_${i}`).join(" ");
 
 describe("chunker", () => {
   it("gives a chunk that crosses a page boundary both pages", () => {
-    const pages = [{ pageNumber: 1, text: para(1, 30) }, { pageNumber: 2, text: para(2, 30) }];
+    const pages = [{ pageNumber: 1, text: words(1, 30) }, { pageNumber: 2, text: words(2, 30) }];
     const out = chunk(pages, { targetTokens: 400, overlapTokens: 0 });
     expect(out[0].page).toBe(1);
     expect(out[0].pageEnd).toBe(2);
@@ -339,20 +341,20 @@ describe("chunker", () => {
   });
 
   it("gives a chunk on one page the same page and pageEnd", () => {
-    const out = chunk([{ pageNumber: 1, text: para(1, 30) }], { targetTokens: 400, overlapTokens: 0 });
+    const out = chunk([{ pageNumber: 1, text: words(1, 30) }], { targetTokens: 400, overlapTokens: 0 });
     expect(out[0].page).toBe(1);
     expect(out[0].pageEnd).toBe(1);
   });
 
-  it("splits a paragraph larger than the target instead of emitting it oversized", () => {
-    const pages = [{ pageNumber: 1, text: para(1, 2000) }];
+  it("splits text with no sentence endings instead of emitting it oversized", () => {
+    const pages = [{ pageNumber: 1, text: words(1, 2000) }];
     const out = chunk(pages, { targetTokens: 400, overlapTokens: 0 });
     expect(out.length).toBeGreaterThan(1);
     for (const c of out) expect(countTokens(c.content)).toBeLessThanOrEqual(400);
   });
 
   it("overlaps consecutive chunks by roughly overlapTokens", () => {
-    const pages = [{ pageNumber: 1, text: [para(1, 300), para(2, 300), para(3, 300)].join("\n\n") }];
+    const pages = [{ pageNumber: 1, text: words(1, 900) }];
     const out = chunk(pages, { targetTokens: 400, overlapTokens: 60 });
     const opening = out[1].content.split(" ").slice(0, 5).join(" ");
     const start = out[0].content.lastIndexOf(opening);
@@ -364,12 +366,14 @@ describe("chunker", () => {
   });
 
   it("tags a chunk with the page where its overlap starts when the overlap reaches an earlier page", () => {
-    // Page 2 opens with a 12-token paragraph, so a 60-token overlap has to reach back onto page 1.
+    // Page 2 opens with a 13-token sentence, so a 60-token overlap has to reach back onto page 1.
+    // The \n is a wrapped line, as in real extracted text.
     const pages = [
-      { pageNumber: 1, text: para(1, 80) },
-      { pageNumber: 2, text: [para(2, 3), para(3, 60)].join("\n\n") },
+      { pageNumber: 1, text: `${words(1, 80)}.` },
+      { pageNumber: 2, text: `${words(2, 3)}.\n${words(3, 60)}.` },
     ];
     const out = chunk(pages, { targetTokens: 400, overlapTokens: 60 });
+    expect(out[0].content.endsWith(".")).toBe(true);            // chunks end at a sentence boundary
     expect(out[1].content).toContain("w2_0");
     expect(out[1].page).toBe(1);
     expect(out[1].pageEnd).toBe(2);
@@ -392,18 +396,18 @@ import { extractText, getDocumentProxy } from "unpdf";
 import { OpenAIEmbeddings } from "@langchain/openai";
 import pgvector from "pgvector/pg";
 import { pool } from "../src/db";
-import { chunk } from "../src/chunker";
-import { removeHyphens, removeTableOfContents } from "../src/clean";
+import { chunk } from "../src/ingest/chunker";
+import { removeHyphens, removeTableOfContents } from "../src/ingest/clean";
 
 const bookId = process.argv[2];
 const emb = new OpenAIEmbeddings({ model: process.env.EMBEDDING_MODEL });
 
-// Array index of each book's first body page. Replace the 0s after checking each PDF.
-const bodyStartIdx: Record<string, number> = {
-  "algorithms-erickson": 0,
-  "ostep": 0,
-  "eloquent-js-4e": 0,
-  "pro-git-2e": 0,
+// Each book's first body page, as the PDF viewer numbers it. Replace the 1s after checking each PDF.
+const bodyStartPage: Record<string, number> = {
+  "algorithms-erickson": 1,
+  "ostep": 1,
+  "eloquent-js-4e": 1,
+  "pro-git-2e": 1,
 };
 
 async function main() {
@@ -413,7 +417,7 @@ async function main() {
   const pdf = await getDocumentProxy(new Uint8Array(readFileSync(path.join("corpus", book.filepath))));
   const { text, totalPages } = await extractText(pdf, { mergePages: false });
   const pages = text.map((t, i) => ({ pageNumber: i + 1, text: removeHyphens(t) }));   // PDF position, not the printed number
-  const body = removeTableOfContents(pages, bodyStartIdx[bookId]);
+  const body = removeTableOfContents(pages, bodyStartPage[bookId]);
 
   const chunks = chunk(body, { targetTokens: 400, overlapTokens: 60 });
   console.log(`${bookId}: ${totalPages} pages → ${chunks.length} chunks`);
@@ -449,7 +453,7 @@ main();
 
 Make `npm run ingest` with no argument loop over every row in `books`.
 
-Before the first run, find each book's first body page and fill in `bodyStartIdx`. Tables of contents match lots of queries while answering none of them, so they stay out of the index. `pageNumber` is attached before the slice, so dropping pages doesn't renumber the rest.
+Before the first run, find each book's first body page and fill in `bodyStartPage`. Tables of contents match lots of queries while answering none of them, so they stay out of the index. `pageNumber` is attached before the slice, so dropping pages doesn't renumber the rest.
 
 The transaction uses one client per batch because each `pool.query` can run on a different connection, which would leave `BEGIN`, the inserts and `COMMIT` on separate ones. The client is checked out after the embedding call, so a failed API call can't leave it unreleased.
 

@@ -73,7 +73,7 @@ Two books, both free as PDF and licensed for redistribution:
 
 Confirm each license before ingesting and record it in `corpus/LICENSES.md`. The README states the corpus and licenses in one sentence. The project uses nothing purchased or DRM-protected.
 
-Known limitation: PDF text extraction mangles code blocks, hyphenated line breaks and running headers. Some eval questions about code will miss because of extraction, not retrieval. The error analysis in M2 labels those misses so they are not mistaken for retrieval bugs.
+Known limitation: PDF text extraction mangles code blocks, hyphenated line breaks and running headers, and it leaves no blank lines between paragraphs (none on any page of the four PDFs), so chunks are built from sentences and can't follow the author's paragraph breaks. Some eval questions about code will miss because of extraction, not retrieval. The error analysis in M2 labels those misses so they are not mistaken for retrieval bugs.
 
 ## 4. Architecture
 
@@ -233,7 +233,7 @@ Accept when all four run. Surprises go in `docs/notes.md`.
 
 `scripts/ingest.ts <book-id>` extracts per page, numbers pages by their position in the PDF (first page = 1, never the printed number), drops front matter, rejoins words hyphenated across line breaks, calls `chunk(pages, { targetTokens: 400, overlapTokens: 60 })`, embeds in batches of 50, and inserts in transactions. Re-running a book deletes its chunks first.
 
-The chunker splits on paragraph boundaries toward the target size, carries the pages of the chunk's first and last characters, overlaps consecutive chunks, and never crosses a book boundary. It has five tests: a page boundary inside a chunk, a chunk on a single page, a paragraph larger than the target, overlap length, and an overlap that reaches back onto an earlier page.
+The chunker builds chunks from whole sentences toward the target size, falling back to word splits for text with no sentence endings. It carries the pages of the chunk's first and last characters, overlaps consecutive chunks, and never crosses a book boundary. It has five tests: a page boundary inside a chunk, a chunk on a single page, text larger than the target with no sentence endings, overlap length, and an overlap that reaches back onto an earlier page.
 
 Accept when every row in `books` has chunks, `SELECT book_id, count(*) FROM chunks GROUP BY 1` looks right, three random chunks checked against the PDF start on `page` and end on `page_end`, a re-run leaves the counts unchanged, and the chunker tests pass.
 
@@ -320,7 +320,7 @@ The README is a single page with these sections, in this order:
 4. The results table from `evals/results.md`, in change order, with the eval version column.
 5. What the numbers say: three sentences on the biggest surprise, and one on whether the retry loop earned its cost.
 6. Error analysis: the miss buckets from M2 and what each one led to.
-7. Decisions, one short paragraph each, with the alternative named: chunk size; a page range per chunk over a single page (a chunk can score a hit on a page where it holds only overlap text); RRF over weighted sum; `ts_rank` over BM25; HNSW over IVFFlat; embedding model (cost, dimension, license); LangGraph's fixed graph over a free-form tool-calling loop; web fallback after retries rather than as a first-class source.
+7. Decisions, one short paragraph each, with the alternative named: chunk size; sentences over paragraphs as the unit chunks are built from; a page range per chunk over a single page (a chunk can score a hit on a page where it holds only overlap text); RRF over weighted sum; `ts_rank` over BM25; HNSW over IVFFlat; embedding model (cost, dimension, license); LangGraph's fixed graph over a free-form tool-calling loop; web fallback after retries rather than as a first-class source.
 8. Known limitations: PDF extraction quality (code blocks), web answers are unverified, single tenant, no reranking yet.
 9. Hardest bug and how it was found.
 10. How AI was used in the build: what it helped with, what was written and reviewed by hand.
@@ -413,9 +413,9 @@ Only after M5, in order of value:
 |---|---|
 | chunker: page boundary inside a chunk | `page` is the first character's page, `page_end` the last character's |
 | chunker: chunk on one page | `page` equals `page_end` |
-| chunker: paragraph larger than target | split, not emitted oversized |
+| chunker: text larger than target, no sentence endings | split by word, not emitted oversized |
 | chunker: overlap | consecutive chunks share `overlapTokens` |
-| chunker: overlap reaching onto an earlier page | `page` is the page where the overlap starts |
+| chunker: overlap reaching onto an earlier page | chunks end at sentence boundaries, and `page` is the page where the overlap starts |
 | rrf: item in only one list | fused and ordered correctly |
 | citations: id outside either set | flagged |
 | agent: grader always says no, `WEB_FALLBACK=off` (mocked) | exits after exactly `MAX_ATTEMPTS` with `source = 'none'` |
