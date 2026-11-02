@@ -34,10 +34,8 @@ export async function readPages(filepath: string): Promise<Page[]> {
 
 export function cleanPdf(pdf:Page[], bodyStartPage:number):Page[]{
     let bodyPages = removeTableOfContents(pdf,bodyStartPage);
-    for(let i = 0; i < bodyPages.length; i++){
-        for(const fn of CLEANING_FUNCTIONS)
-            bodyPages[i].text = fn(bodyPages[i].text);
-    }
+    for(const fn of CLEANING_FUNCTIONS)
+        bodyPages = bodyPages.map((page)=> ({...page, text:fn(page.text)}));
     return bodyPages;
 }
 

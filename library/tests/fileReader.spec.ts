@@ -1,5 +1,5 @@
 import {describe, it,expect} from "vitest";
-import { cleanPdf } from "../src/ingest/readPdf";
+import { cleanPdf } from "../src/ingest/fileReader";
 import { Page } from "../src/ingest/chunker";
 
 describe("cleanPdf", () => {
