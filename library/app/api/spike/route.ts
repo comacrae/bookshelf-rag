@@ -84,6 +84,9 @@ Your version replaces source with the model's stream. Remember that a chunk is a
 
 export async function POST(req:Request) {
     // take in the query sentence from the req body
+    if(process.env.NODE_ENV !== 'development'){
+      return new Response("Not found", {status: 404,headers: {'Content-Type': 'text/plain'}});
+    }
 
     const {prompt} = await req.json(); // read body stream as bytes -> decode bytes to string -> JSON.parse the string
 
