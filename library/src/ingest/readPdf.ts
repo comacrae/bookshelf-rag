@@ -6,7 +6,9 @@ import type { Page } from "../chunker";
 *   Read in a pdf, remove the table of contents, clean the hyphens, and return the results as a list of strings
 */
 
-async function readPages(filepath: string): Promise<Page[]> {
+const CLEANING_FUNCTIONS = [removeHyphens];
+
+export async function readPages(filepath: string): Promise<Page[]> {
     /**
      * Reads a pdf file buffer, converts it to a byte array, then reads by pages and returns as Page array
      */
@@ -27,10 +29,11 @@ async function readPages(filepath: string): Promise<Page[]> {
     return extraction.text.map((text, idx) =>( {pageNumber:idx + 1, text}));
 }
 
-function cleanPdf(pdf:Page[], bodyStartIdx:number):Page[]{
-    let bodyPages = removeTableOfContents(pdf,bodyStartIdx);
-    for(let i = 0; i < pdf.length; i++){
-        bodyPages[i].text = removeHyphens(pdf[i].text);
+export function cleanPdf(pdf:Page[], bodyStartPage:number):Page[]{
+    let bodyPages = removeTableOfContents(pdf,bodyStartPage);
+    for(let i = 0; i < bodyPages.length; i++){
+        for(const fn of CLEANING_FUNCTIONS)
+            bodyPages[i].text = fn(bodyPages[i].text);
     }
     return bodyPages;
 }

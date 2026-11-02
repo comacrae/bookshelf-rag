@@ -4,6 +4,6 @@ export function removeHyphens(input:string): string{
     return input.replace(/\-\n/g,"");
 }
 
-export function removeTableOfContents(pages:{pageNumber:number, text:string}[], bodyStartIdx:number): Page[] {
-    return pages.slice(bodyStartIdx);
+export function removeTableOfContents(pages:{pageNumber:number, text:string}[], bodyStartPage:number): Page[] {
+    return pages.slice(bodyStartPage - 1);
 }
