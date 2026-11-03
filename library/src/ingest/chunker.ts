@@ -15,67 +15,42 @@ export type ChunkOpts = {
     overlapTokens:number
 };
 
-type Piece = {
-    page:number, text:string, tokens:number
-}
-
 const encoder = getEncoding("cl100k_base");
 
 
 
 export function getChunks(pages:Page[], opts:ChunkOpts):Chunk[]{
 
-
-    // matches any punctuation at end of a sentence followed by white space and keeps punctuation but removes whitespace
-    const regex = /(?<=[.!?])\s+/; 
-    let chunks: Chunk[] = [];
-    let buffer: Piece[] = [];
-    let bufferTokens = 0;
-
-    const emit = () => {
-        chunks.push({
-            page:buffer[0].page,
-            pageEnd:buffer[buffer.length-1].page,
-            chunkIndex: chunks.length,
-            content : buffer.map((piece) => piece.text).join(" ")
-        })
-        buffer = [];
-        bufferTokens = 0;
-    }
-
+    //init arrays
+    const tokens:number[] =  [];
+    const tokenPages:number[] = [];
+    const chunks: Chunk[] = [];
+    
+    //for each page, add the tokens and map their respective page
     for(const page of pages){
-        // split page into sentences
-        const sentences = page.text.split(regex);
-        // for each sentence, encode and split into sections of size X tokens
-        for(const sentence of sentences){
-
-            // encode the sentence
-            const encoded = encoder.encode(sentence);
-
-            // for section sizes of X tokens
-            for(let i = 0; i < encoded.length; i += opts.targetTokens){
-                // slice the encoding into X tokens
-                const slice = encoded.slice(i, i+opts.targetTokens);
-
-                //decode it back into text
-                const decoded = encoder.decode(slice);
-
-                // build the piece, keeping track of page number and slice size
-                const piece: Piece = {page:page.pageNumber, text: decoded, tokens:slice.length};
-
-                // if adding this piece to the buffer would exceed size, then add a chunk
-                if(bufferTokens + piece.tokens > opts.targetTokens)
-                    emit();
-
-                buffer.push(piece);
-                bufferTokens += slice.length;
-            }
-            
-        }
-
+        const encoded = encoder.encode(page.text + "\n");
+        tokens.push(...encoded);
+        tokenPages.push(...new Array(encoded.length).fill(page.pageNumber));
     }
-    if(buffer.length > 0)
-        emit();
+
+    //create a sliding window and build chunks from it
+    const step = opts.targetTokens - opts.overlapTokens; // we want X tokens overlap per chunk
+
+    for(let start = 0; start < tokens.length; start+= step){ // increment by step smaller than token window
+
+        const end = Math.min(start + opts.targetTokens, tokens.length); // to prevent OOB on tokenPages
+
+        chunks.push({
+            page:tokenPages[start],
+            pageEnd:tokenPages[end - 1],
+            chunkIndex: chunks.length, // 0-indexed
+            content: encoder.decode(tokens.slice(start,end))
+        })
+
+        // if the end is already at the end of the tokens, we break to avoid a chunk that is just an overlap
+        if(end === tokens.length) 
+            break;
+    }                              
 
     return chunks;
 }
