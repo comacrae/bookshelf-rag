@@ -286,7 +286,7 @@ Checkpoint: `npm run migrate` prints `applied 003_add_page_end.sql`, and `\d chu
 
 ### 2.1 The chunker
 
-This is the first piece you type by hand. PDF extraction leaves no blank lines on any page of the four books, and every `\n` is only a wrapped line, so chunks are built from sentences rather than paragraphs. Create `src/ingest/chunker.ts`:
+This is the first piece you type by hand. PDF extraction leaves no blank lines on any page of the four books, so paragraphs can't be detected. The chunker slides a fixed token window over the whole book instead. Create `src/ingest/chunker.ts`:
 
 ```ts
 import { getEncoding } from "js-tiktoken";
@@ -296,24 +296,18 @@ export type Page = { pageNumber: number; text: string };
 export type Chunk = { page: number; pageEnd: number; chunkIndex: number; content: string };
 export type ChunkOpts = { targetTokens: number; overlapTokens: number };
 
-const countTokens = (s: string) => enc.encode(s).length;
-
-export function chunk(pages: Page[], opts: ChunkOpts): Chunk[] {
-  // 1. Turn pages into sentences, each tagged with its page. A sentence ends at . ! or ? followed by whitespace.
-  //    A \n is whitespace and doesn't end anything by itself.
-  // 2. A run of text bigger than targetTokens with no sentence endings (code, figure labels) is split by word
-  //    until each piece fits.
-  // 3. Walk the pieces, accumulating into a buffer until adding the next one would exceed targetTokens.
-  //    When it would, emit the buffer as a chunk whose page is the page of the buffer's first piece
-  //    and whose pageEnd is the page of its last piece.
-  // 4. Overlap: when starting a new chunk, seed the buffer with the last overlapTokens worth of text
-  //    from the previous chunk, tagged with the page where that text starts. If the previous chunk's
-  //    last piece is shorter than overlapTokens, that can be an earlier piece's page.
-  // 5. Return chunks numbered 0..n-1.
+export function getChunks(pages: Page[], opts: ChunkOpts): Chunk[] {
+  // 1. Flatten the book into two lists of the same length: tokens, and the page of each token.
+  //    Encode page.text + "\n" so the last word of a page doesn't join the first word of the next.
+  // 2. Slide a window of targetTokens along the tokens, moving forward targetTokens - overlapTokens each time.
+  //    Each window is a chunk: page is the page of its first token, pageEnd the page of its last,
+  //    and content is the decoded tokens.
+  // 3. Stop once a window reaches the last token, so the book doesn't end in a chunk of only overlap.
+  // 4. Return chunks numbered 0..n-1.
 }
 ```
 
-Write it. The comments are the algorithm; the code is yours. Keep it under 80 lines. The hard case is step 4: the overlap text comes from the end of the previous chunk, and its page tag must be the page where that text actually lives, which may differ from the new chunk's first fresh sentence. Decide which page the chunk reports (the spec says: the page of the chunk's first character, which is the overlap's page) and make the test enforce it. `pageEnd` is the page of the chunk's last character, so that chunk reports both pages.
+Write it. The comments are the algorithm; the code is yours. It takes about 20 lines. Because the two lists line up, overlap and page ranges need no special handling: a window that starts in text from page 7 and ends on page 8 reports 7–8. The trade-off is that chunks can begin and end mid-sentence or mid-word.
 
 ### 2.2 Chunker tests
 
@@ -322,40 +316,39 @@ Create `tests/chunker.test.ts`:
 ```ts
 import { describe, it, expect } from "vitest";
 import { getEncoding } from "js-tiktoken";
-import { chunk } from "../src/ingest/chunker";
+import { getChunks } from "../src/ingest/chunker";
 
 const enc = getEncoding("cl100k_base");
 const countTokens = (s: string) => enc.encode(s).length;
 
 // Words with an index under 100 are 4 tokens each, so words(n, 30) is 120 tokens and words(n, 80) is 320.
-// There's no punctuation, so one call is one unbroken run of text. Add "." to make it a sentence.
 const words = (n: number, count = 60) => Array.from({ length: count }, (_, i) => `w${n}_${i}`).join(" ");
 
 describe("chunker", () => {
   it("gives a chunk that crosses a page boundary both pages", () => {
     const pages = [{ pageNumber: 1, text: words(1, 30) }, { pageNumber: 2, text: words(2, 30) }];
-    const out = chunk(pages, { targetTokens: 400, overlapTokens: 0 });
+    const out = getChunks(pages, { targetTokens: 400, overlapTokens: 0 });
     expect(out[0].page).toBe(1);
     expect(out[0].pageEnd).toBe(2);
     expect(out[0].content).toContain("w2_0");
   });
 
   it("gives a chunk on one page the same page and pageEnd", () => {
-    const out = chunk([{ pageNumber: 1, text: words(1, 30) }], { targetTokens: 400, overlapTokens: 0 });
+    const out = getChunks([{ pageNumber: 1, text: words(1, 30) }], { targetTokens: 400, overlapTokens: 0 });
     expect(out[0].page).toBe(1);
     expect(out[0].pageEnd).toBe(1);
   });
 
-  it("splits text with no sentence endings instead of emitting it oversized", () => {
+  it("never emits a chunk larger than the target", () => {
     const pages = [{ pageNumber: 1, text: words(1, 2000) }];
-    const out = chunk(pages, { targetTokens: 400, overlapTokens: 0 });
+    const out = getChunks(pages, { targetTokens: 400, overlapTokens: 0 });
     expect(out.length).toBeGreaterThan(1);
     for (const c of out) expect(countTokens(c.content)).toBeLessThanOrEqual(400);
   });
 
   it("overlaps consecutive chunks by roughly overlapTokens", () => {
     const pages = [{ pageNumber: 1, text: words(1, 900) }];
-    const out = chunk(pages, { targetTokens: 400, overlapTokens: 60 });
+    const out = getChunks(pages, { targetTokens: 400, overlapTokens: 60 });
     const opening = out[1].content.split(" ").slice(0, 5).join(" ");
     const start = out[0].content.lastIndexOf(opening);
     expect(start).toBeGreaterThan(-1);                          // chunk 1 opens with text from chunk 0
@@ -365,25 +358,26 @@ describe("chunker", () => {
     expect(countTokens(shared)).toBeLessThanOrEqual(80);
   });
 
-  it("tags a chunk with the page where its overlap starts when the overlap reaches an earlier page", () => {
-    // Page 2 opens with a 13-token sentence, so a 60-token overlap has to reach back onto page 1.
-    // The \n is a wrapped line, as in real extracted text.
-    const pages = [
-      { pageNumber: 1, text: `${words(1, 80)}.` },
-      { pageNumber: 2, text: `${words(2, 3)}.\n${words(3, 60)}.` },
-    ];
-    const out = chunk(pages, { targetTokens: 400, overlapTokens: 60 });
-    expect(out[0].content.endsWith(".")).toBe(true);            // chunks end at a sentence boundary
+  it("tags a chunk with the page where its overlap starts", () => {
+    // Page 1 is 360 tokens, so the second window starts at token 340, still on page 1.
+    const pages = [{ pageNumber: 1, text: words(1, 90) }, { pageNumber: 2, text: words(2, 30) }];
+    const out = getChunks(pages, { targetTokens: 400, overlapTokens: 60 });
     expect(out[1].content).toContain("w2_0");
     expect(out[1].page).toBe(1);
     expect(out[1].pageEnd).toBe(2);
   });
+
+  it("doesn't add a chunk of only overlap when the text ends inside the first window", () => {
+    // 340 tokens plus the page's newline: the first window holds it all.
+    const out = getChunks([{ pageNumber: 1, text: words(1, 85) }], { targetTokens: 400, overlapTokens: 60 });
+    expect(out.length).toBe(1);
+  });
 });
 ```
 
-Adjust the assertions to your implementation's exact behavior, but keep the five cases. Each test name says what edge it covers; that's what a reviewer reads.
+Adjust the assertions to your implementation's exact behavior, but keep the six cases. Each test name says what edge it covers; that's what a reviewer reads.
 
-Checkpoint: `npm test` passes all five. Commit: `M1 chunker with tests`.
+Checkpoint: `npm test` passes all six. Commit: `M1 chunker with tests`.
 
 ### 2.3 The ingest script
 
@@ -396,7 +390,7 @@ import { extractText, getDocumentProxy } from "unpdf";
 import { OpenAIEmbeddings } from "@langchain/openai";
 import pgvector from "pgvector/pg";
 import { pool } from "../src/db";
-import { chunk } from "../src/ingest/chunker";
+import { getChunks } from "../src/ingest/chunker";
 import { removeHyphens, removeTableOfContents } from "../src/ingest/clean";
 
 const bookId = process.argv[2];
@@ -419,7 +413,7 @@ async function main() {
   const pages = text.map((t, i) => ({ pageNumber: i + 1, text: removeHyphens(t) }));   // PDF position, not the printed number
   const body = removeTableOfContents(pages, bodyStartPage[bookId]);
 
-  const chunks = chunk(body, { targetTokens: 400, overlapTokens: 60 });
+  const chunks = getChunks(body, { targetTokens: 400, overlapTokens: 60 });
   console.log(`${bookId}: ${totalPages} pages → ${chunks.length} chunks`);
 
   await pool.query("DELETE FROM chunks WHERE book_id = $1", [bookId]);   // makes re-runs safe
