@@ -1,6 +1,6 @@
 import { readFile } from "fs/promises";
 import {extractText, getDocumentProxy} from "unpdf";
-import { removeTableOfContents, removeHyphens } from "./clean";
+import { extractBody, removeHyphens } from "./clean";
 import type { Page } from "./chunker";
 import { join } from "path";
 /*
@@ -32,8 +32,8 @@ export async function readPages(filepath: string): Promise<Page[]> {
     return extraction.text.map((text, idx) =>( {pageNumber:idx + 1, text}));
 }
 
-export function cleanPdf(pdf:Page[], bodyStartPage:number):Page[]{
-    let bodyPages = removeTableOfContents(pdf,bodyStartPage);
+export function cleanPdf(pdf:Page[], bodyStartPage:number,bodyEndPage:number):Page[]{
+    let bodyPages = extractBody(pdf,bodyStartPage, bodyEndPage);
     for(const fn of CLEANING_FUNCTIONS)
         bodyPages = bodyPages.map((page)=> ({...page, text:fn(page.text)}));
     return bodyPages;
