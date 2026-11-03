@@ -1,17 +1,13 @@
-import {OpenAIEmbeddings} from "@langchain/openai";
 import pgvector from "pgvector/pg";
 import {pool} from "../db";
+import {embeddingModel as model} from "../model";
 import type { Chunk } from "./chunker";
 
 
 export const vectorize = async (bookSlug:string,chunks:Chunk[]):Promise<void> => {
 
     //init embedding model    
-    const embeddingDim: number | undefined = process.env.EMBEDDING_DIM ? Number(process.env.EMBEDDING_DIM): undefined;
-    if(embeddingDim === undefined || Number.isNaN(embeddingDim))
-        throw new Error('Embedding dim undefined in .env');
-
-    const model = new OpenAIEmbeddings({apiKey:process.env.OPENAI_API_KEY, model: process.env.EMBEDDING_MODEL, dimensions: embeddingDim});
+    
 
     const batchSize = 50;
 
