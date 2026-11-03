@@ -1,5 +1,5 @@
 import {describe, it,expect} from "vitest";
-import { removeHyphens } from "../src/ingest/clean";
+import { removeHyphens, removeNulls } from "../src/ingest/clean";
 
 describe("removeHyphens", () => {
     it("Joins a word across a line break", () => 
@@ -21,4 +21,10 @@ describe("removeHyphens", () => {
         expect(removeHyphens("v1.8.5-rc0")).toBe("v1.8.5-rc0");
     })
     });
+
+    describe("removeNulls", ()=>{
+        it("removes null strings", ()=>{
+            expect(removeNulls( "tes\u0000t")).toBe("test");
+        })
+    })
 
