@@ -105,7 +105,7 @@ import { Pool } from "pg";
 export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 ```
 
-Create `migrations/001_schema.sql` with the `books`, `chunks` and `requests` tables from `SPEC.md` section 5. Replace `DIM` with your `EMBEDDING_DIM` value. Do not add the HNSW index yet; that is migration 002, later.
+Create `migrations/001_schema.sql` with the `books`, `chunks` and `requests` tables from `SPEC.md` section 5. Replace `DIM` with your `EMBEDDING_DIM` value. Do not add the HNSW index yet; it comes later, as migration 004.
 
 Create `scripts/migrate.ts`:
 
@@ -154,7 +154,7 @@ INSERT INTO books (id, title, file) VALUES
   ('pro-git-2e', 'Pro Git, 2nd ed.', 'corpus/pro-git-2e.pdf');
 ```
 
-Put that in `migrations/002_books.sql` so a clean clone gets it. (Renumber the HNSW migration to 003 later.)
+Put that in `migrations/002_books.sql` so a clean clone gets it. (Migration 003 adds `page_end` in Chapter 2, and the HNSW index becomes 004.)
 
 Checkpoint: `LICENSES.md` has one verified line per book; `SELECT * FROM books` lists them all.
 
@@ -276,33 +276,38 @@ Commit: `M0 spike complete`. (The `spike/` folder is gitignored; what you commit
 
 ## Chapter 2: ingest (M1)
 
+### 2.0 Add `page_end`
+
+A chunk can cross a page, so it stores a range: `page` is where its first character is and `page_end` is where its last character is. Citations show `p. 12–13`, and the eval counts a hit when an answer page falls anywhere in the range. With only a starting page, a chunk that starts on page 12 and holds an answer on page 13 would score as a miss.
+
+`001` is already applied, so this is a new file, `migrations/003_add_page_end.sql`. Add `page_end` as `int NOT NULL`, which works without a default because `chunks` is still empty, plus a check that `page_end >= page`.
+
+Checkpoint: `npm run migrate` prints `applied 003_add_page_end.sql`, and `\d chunks` shows the column and the check.
+
 ### 2.1 The chunker
 
-This is the first piece you type by hand. Create `src/chunker.ts`:
+This is the first piece you type by hand. PDF extraction leaves no blank lines on any page of the four books, so paragraphs can't be detected. The chunker slides a fixed token window over the whole book instead. Create `src/ingest/chunker.ts`:
 
 ```ts
 import { getEncoding } from "js-tiktoken";
 const enc = getEncoding("cl100k_base");
 
-export type Page = { page: number; text: string };
-export type Chunk = { page: number; chunkIndex: number; content: string };
+export type Page = { pageNumber: number; text: string };
+export type Chunk = { page: number; pageEnd: number; chunkIndex: number; content: string };
 export type ChunkOpts = { targetTokens: number; overlapTokens: number };
 
-const countTokens = (s: string) => enc.encode(s).length;
-
-export function chunk(pages: Page[], opts: ChunkOpts): Chunk[] {
-  // 1. Turn pages into paragraphs, each tagged with the page it starts on.
-  //    Split on blank lines; if a page has no blank lines, treat the page as one paragraph.
-  // 2. Walk paragraphs, accumulating into a buffer until adding the next one would exceed targetTokens.
-  //    When it would, emit the buffer as a chunk whose page is the page of the buffer's first paragraph.
-  // 3. A single paragraph bigger than targetTokens is split by sentence until each piece fits.
-  // 4. Overlap: when starting a new chunk, seed the buffer with the last overlapTokens worth of text
-  //    from the previous chunk (same page tag as that text).
-  // 5. Return chunks numbered 0..n-1.
+export function getChunks(pages: Page[], opts: ChunkOpts): Chunk[] {
+  // 1. Flatten the book into two lists of the same length: tokens, and the page of each token.
+  //    Encode page.text + "\n" so the last word of a page doesn't join the first word of the next.
+  // 2. Slide a window of targetTokens along the tokens, moving forward targetTokens - overlapTokens each time.
+  //    Each window is a chunk: page is the page of its first token, pageEnd the page of its last,
+  //    and content is the decoded tokens.
+  // 3. Stop once a window reaches the last token, so the book doesn't end in a chunk of only overlap.
+  // 4. Return chunks numbered 0..n-1.
 }
 ```
 
-Write it. The comments are the algorithm; the code is yours. Keep it under 80 lines. The hard case is step 4: the overlap text comes from the end of the previous chunk, and its page tag must be the page where that text actually lives, which may differ from the new chunk's first fresh paragraph. Decide which page the chunk reports (the spec says: the page of the chunk's first character, which is the overlap's page) and make the test enforce it.
+Write it. The comments are the algorithm; the code is yours. It takes about 20 lines. Because the two lists line up, overlap and page ranges need no special handling: a window that starts in text from page 7 and ends on page 8 reports 7–8. The trade-off is that chunks can begin and end mid-sentence or mid-word.
 
 ### 2.2 Chunker tests
 
@@ -310,37 +315,69 @@ Create `tests/chunker.test.ts`:
 
 ```ts
 import { describe, it, expect } from "vitest";
-import { chunk } from "../src/chunker";
+import { getEncoding } from "js-tiktoken";
+import { getChunks } from "../src/ingest/chunker";
 
-const para = (n: number, words = 60) => Array.from({ length: words }, (_, i) => `w${n}_${i}`).join(" ");
+const enc = getEncoding("cl100k_base");
+const countTokens = (s: string) => enc.encode(s).length;
+
+// Words with an index under 100 are 4 tokens each, so words(n, 30) is 120 tokens and words(n, 80) is 320.
+const words = (n: number, count = 60) => Array.from({ length: count }, (_, i) => `w${n}_${i}`).join(" ");
 
 describe("chunker", () => {
-  it("tags a chunk that straddles a page boundary with the page of its first character", () => {
-    const pages = [{ page: 1, text: para(1) }, { page: 2, text: para(2) }];
-    const out = chunk(pages, { targetTokens: 400, overlapTokens: 0 });
+  it("gives a chunk that crosses a page boundary both pages", () => {
+    const pages = [{ pageNumber: 1, text: words(1, 30) }, { pageNumber: 2, text: words(2, 30) }];
+    const out = getChunks(pages, { targetTokens: 400, overlapTokens: 0 });
     expect(out[0].page).toBe(1);
-    expect(out[0].content).toContain("w2_0"); // page 2 text landed in a page-1 chunk
+    expect(out[0].pageEnd).toBe(2);
+    expect(out[0].content).toContain("w2_0");
   });
 
-  it("splits a paragraph larger than the target instead of emitting it oversized", () => {
-    const pages = [{ page: 1, text: para(1, 2000) }];
-    const out = chunk(pages, { targetTokens: 400, overlapTokens: 0 });
+  it("gives a chunk on one page the same page and pageEnd", () => {
+    const out = getChunks([{ pageNumber: 1, text: words(1, 30) }], { targetTokens: 400, overlapTokens: 0 });
+    expect(out[0].page).toBe(1);
+    expect(out[0].pageEnd).toBe(1);
+  });
+
+  it("never emits a chunk larger than the target", () => {
+    const pages = [{ pageNumber: 1, text: words(1, 2000) }];
+    const out = getChunks(pages, { targetTokens: 400, overlapTokens: 0 });
     expect(out.length).toBeGreaterThan(1);
-    // every chunk under target plus a small tolerance for the last sentence
+    for (const c of out) expect(countTokens(c.content)).toBeLessThanOrEqual(400);
   });
 
   it("overlaps consecutive chunks by roughly overlapTokens", () => {
-    const pages = [{ page: 1, text: [para(1, 300), para(2, 300), para(3, 300)].join("\n\n") }];
-    const out = chunk(pages, { targetTokens: 400, overlapTokens: 60 });
-    const tail = out[0].content.split(" ").slice(-20).join(" ");
-    expect(out[1].content.startsWith(tail.split(" ").slice(0, 5).join(" "))).toBe(true);
+    const pages = [{ pageNumber: 1, text: words(1, 900) }];
+    const out = getChunks(pages, { targetTokens: 400, overlapTokens: 60 });
+    const opening = out[1].content.split(" ").slice(0, 5).join(" ");
+    const start = out[0].content.lastIndexOf(opening);
+    expect(start).toBeGreaterThan(-1);                          // chunk 1 opens with text from chunk 0
+    const shared = out[0].content.slice(start);
+    expect(out[1].content.startsWith(shared)).toBe(true);       // the shared text runs to the end of chunk 0
+    expect(countTokens(shared)).toBeGreaterThanOrEqual(50);
+    expect(countTokens(shared)).toBeLessThanOrEqual(80);
+  });
+
+  it("tags a chunk with the page where its overlap starts", () => {
+    // Page 1 is 360 tokens, so the second window starts at token 340, still on page 1.
+    const pages = [{ pageNumber: 1, text: words(1, 90) }, { pageNumber: 2, text: words(2, 30) }];
+    const out = getChunks(pages, { targetTokens: 400, overlapTokens: 60 });
+    expect(out[1].content).toContain("w2_0");
+    expect(out[1].page).toBe(1);
+    expect(out[1].pageEnd).toBe(2);
+  });
+
+  it("doesn't add a chunk of only overlap when the text ends inside the first window", () => {
+    // 340 tokens plus the page's newline: the first window holds it all.
+    const out = getChunks([{ pageNumber: 1, text: words(1, 85) }], { targetTokens: 400, overlapTokens: 60 });
+    expect(out.length).toBe(1);
   });
 });
 ```
 
-Adjust the assertions to your implementation's exact behavior, but keep the three cases. Each test name says what edge it covers; that's what a reviewer reads.
+Adjust the assertions to your implementation's exact behavior, but keep the six cases. Each test name says what edge it covers; that's what a reviewer reads.
 
-Checkpoint: `npm test` passes all three. Commit: `M1 chunker with tests`.
+Checkpoint: `npm test` passes all six. Commit: `M1 chunker with tests`.
 
 ### 2.3 The ingest script
 
@@ -348,39 +385,58 @@ Create `scripts/ingest.ts`:
 
 ```ts
 import { readFileSync } from "fs";
+import path from "path";
 import { extractText, getDocumentProxy } from "unpdf";
 import { OpenAIEmbeddings } from "@langchain/openai";
 import pgvector from "pgvector/pg";
 import { pool } from "../src/db";
-import { chunk } from "../src/chunker";
+import { getChunks } from "../src/ingest/chunker";
+import { removeHyphens, removeTableOfContents } from "../src/ingest/clean";
 
 const bookId = process.argv[2];
 const emb = new OpenAIEmbeddings({ model: process.env.EMBEDDING_MODEL });
+
+// Each book's first body page, as the PDF viewer numbers it. Replace the 1s after checking each PDF.
+const bodyStartPage: Record<string, number> = {
+  "algorithms-erickson": 1,
+  "ostep": 1,
+  "eloquent-js-4e": 1,
+  "pro-git-2e": 1,
+};
 
 async function main() {
   const { rows: [book] } = await pool.query("SELECT * FROM books WHERE id = $1", [bookId]);
   if (!book) throw new Error(`unknown book ${bookId}`);
 
-  const pdf = await getDocumentProxy(new Uint8Array(readFileSync(book.file)));
+  const pdf = await getDocumentProxy(new Uint8Array(readFileSync(path.join("corpus", book.filepath))));
   const { text, totalPages } = await extractText(pdf, { mergePages: false });
-  const pages = text.map((t, i) => ({ page: i + 1, text: t }));   // adjust the +1 per your spike note on page numbering
+  const pages = text.map((t, i) => ({ pageNumber: i + 1, text: removeHyphens(t) }));   // PDF position, not the printed number
+  const body = removeTableOfContents(pages, bodyStartPage[bookId]);
 
-  const chunks = chunk(pages, { targetTokens: 400, overlapTokens: 60 });
+  const chunks = getChunks(body, { targetTokens: 400, overlapTokens: 60 });
   console.log(`${bookId}: ${totalPages} pages → ${chunks.length} chunks`);
 
   await pool.query("DELETE FROM chunks WHERE book_id = $1", [bookId]);   // makes re-runs safe
   for (let i = 0; i < chunks.length; i += 50) {
     const batch = chunks.slice(i, i + 50);
     const vectors = await emb.embedDocuments(batch.map(c => c.content));
-    await pool.query("BEGIN");
-    for (let j = 0; j < batch.length; j++) {
-      const c = batch[j];
-      await pool.query(
-        "INSERT INTO chunks (book_id, page, chunk_index, content, embedding) VALUES ($1,$2,$3,$4,$5)",
-        [bookId, c.page, c.chunkIndex, c.content, pgvector.toSql(vectors[j])]
-      );
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      for (let j = 0; j < batch.length; j++) {
+        const c = batch[j];
+        await client.query(
+          "INSERT INTO chunks (book_id, page, page_end, chunk_index, content, embedding) VALUES ($1,$2,$3,$4,$5,$6)",
+          [bookId, c.page, c.pageEnd, c.chunkIndex, c.content, pgvector.toSql(vectors[j])]
+        );
+      }
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
     }
-    await pool.query("COMMIT");
     process.stdout.write(`\r${Math.min(i + 50, chunks.length)}/${chunks.length}`);
   }
   await pool.query("UPDATE books SET page_count = $1 WHERE id = $2", [totalPages, bookId]);
@@ -391,18 +447,24 @@ main();
 
 Make `npm run ingest` with no argument loop over every row in `books`.
 
-Run it for one book first. While it runs, open the PDF.
+Before the first run, find each book's first body page and fill in `bodyStartPage`. Tables of contents match lots of queries while answering none of them, so they stay out of the index. `pageNumber` is attached before the slice, so dropping pages doesn't renumber the rest.
+
+The transaction uses one client per batch because each `pool.query` can run on a different connection, which would leave `BEGIN`, the inserts and `COMMIT` on separate ones. The client is checked out after the embedding call, so a failed API call can't leave it unreleased.
+
+Run it for the smallest book first, since embedding costs money and any bug shows up there too. While it runs, open the PDF.
 
 Checkpoint, per book:
 
 ```sql
-SELECT book_id, count(*), min(page), max(page) FROM chunks GROUP BY 1;
-SELECT page, left(content, 120) FROM chunks WHERE book_id = 'pro-git-2e' ORDER BY random() LIMIT 3;
+SELECT book_id, count(*), min(page), max(page_end),
+       count(*) FILTER (WHERE page_end > page) AS crossing
+FROM chunks GROUP BY 1;
+SELECT page, page_end, left(content, 120), right(content, 120) FROM chunks WHERE book_id = 'pro-git-2e' ORDER BY random() LIMIT 3;
 ```
 
-Open the PDF to each of the three random pages and find the text. If it's on the stated page, page tagging works. If it's consistently off by a constant, fix the offset in `ingest.ts`; if it's off by a varying amount, your extraction is dropping or merging pages and you need to look at the spike note again.
+Open the PDF to each of the three random chunks, going by the viewer's page position rather than the printed number. If the start of the text is on `page` and the end is on `page_end`, page tagging works. Record the `crossing` share in `docs/notes.md`. If it's consistently off by a constant, fix the offset in `ingest.ts`; if it's off by a varying amount, your extraction is dropping or merging pages and you need to look at the spike note again.
 
-Run ingest a second time for the same book and confirm the count is unchanged. Commit: `M1 ingest, both books loaded` (or however many).
+Run ingest a second time for the same book and confirm the count is unchanged. Then load the other books. Commit: `M1 ingest, N books loaded`.
 
 ## Chapter 3: the eval set and the baseline (M2)
 
@@ -437,14 +499,14 @@ import { OpenAIEmbeddings } from "@langchain/openai";
 import { pool } from "./db";
 
 const emb = new OpenAIEmbeddings({ model: process.env.EMBEDDING_MODEL });
-export type Hit = { id: number; bookId: string; page: number; content: string; score: number };
+export type Hit = { id: number; bookId: string; page: number; pageEnd: number; content: string; score: number };
 
 export async function vectorSearch(q: string, k: number): Promise<Hit[]> {
   const v = pgvector.toSql(await emb.embedQuery(q));
   const { rows } = await pool.query(
-    `SELECT id, book_id, page, content, 1 - (embedding <=> $1) AS score
+    `SELECT id, book_id, page, page_end, content, 1 - (embedding <=> $1) AS score
        FROM chunks ORDER BY embedding <=> $1 LIMIT $2`, [v, k]);
-  return rows.map(r => ({ id: r.id, bookId: r.book_id, page: r.page, content: r.content, score: Number(r.score) }));
+  return rows.map(r => ({ id: r.id, bookId: r.book_id, page: r.page, pageEnd: r.page_end, content: r.content, score: Number(r.score) }));
 }
 ```
 
@@ -473,10 +535,10 @@ const raw: any[] = [];
 for (const q of answerable) {
   const t0 = Date.now();
   const top = await search(q.question, 5);
-  const hit = top.some(h => h.bookId === q.book && q.answerPages.includes(h.page));
+  const hit = top.some(h => h.bookId === q.book && q.answerPages.some(p => p >= h.page && p <= h.pageEnd));
   if (hit) hits++;
-  else console.log(`MISS ${q.id} ${q.hard ? "(hard)" : ""} got pages ${top.map(h => `${h.bookId}:${h.page}`).join(", ")}`);
-  raw.push({ id: q.id, hit, retrieved: top.map(h => ({ book: h.bookId, page: h.page, id: h.id })), ms: Date.now() - t0 });
+  else console.log(`MISS ${q.id} ${q.hard ? "(hard)" : ""} got pages ${top.map(h => `${h.bookId}:${h.page}-${h.pageEnd}`).join(", ")}`);
+  raw.push({ id: q.id, hit, retrieved: top.map(h => ({ book: h.bookId, page: h.page, pageEnd: h.pageEnd, id: h.id })), ms: Date.now() - t0 });
 }
 const recall = hits / answerable.length;
 console.log(`recall@5 = ${(recall * 100).toFixed(1)}%  (${hits}/${answerable.length})`);
@@ -525,7 +587,7 @@ Add to `src/retrieval.ts`:
 ```ts
 export async function keywordSearch(q: string, k: number): Promise<Hit[]> {
   const { rows } = await pool.query(
-    `SELECT id, book_id, page, content, ts_rank(tsv, websearch_to_tsquery('english', $1)) AS score
+    `SELECT id, book_id, page, page_end, content, ts_rank(tsv, websearch_to_tsquery('english', $1)) AS score
        FROM chunks WHERE tsv @@ websearch_to_tsquery('english', $1)
       ORDER BY score DESC LIMIT $2`, [q, k]);
   return rows.map(/* same mapping */);
@@ -574,7 +636,7 @@ EXPLAIN ANALYZE SELECT id FROM chunks ORDER BY embedding <=> '[...your query vec
 
 Get a real query vector by logging one from `vectorSearch`. Paste the plan into `docs/index.md` under "Before". You should see `Seq Scan` and a sort.
 
-Create `migrations/003_hnsw.sql`:
+Create `migrations/004_hnsw.sql`:
 
 ```sql
 CREATE INDEX chunks_embedding_idx ON chunks USING hnsw (embedding vector_cosine_ops);
@@ -695,7 +757,7 @@ export async function answer(s: S) {
 }
 ```
 
-`answerFromBooks` numbers the chunks `[1]`..`[5]` with book title and page, and says: answer only from these, cite every claim with `[n]`, don't use any other citation format, and begin with nothing else. `answerFromWeb` numbers results `[w1]`..`[w3]` with the URL and says the same, plus: state in the first sentence that the books did not cover this and the answer comes from the web.
+`answerFromBooks` numbers the chunks `[1]`..`[5]` with book title and page range, and says: answer only from these, cite every claim with `[n]`, don't use any other citation format, and begin with nothing else. `answerFromWeb` numbers results `[w1]`..`[w3]` with the URL and says the same, plus: state in the first sentence that the books did not cover this and the answer comes from the web.
 
 ### 5.3 The graph
 
@@ -823,7 +885,7 @@ export async function POST(req: Request) {
         if (ev.event === "on_chain_start" && ev.name === "answer") {
           const s = ev.data.input;
           meta = { source: s.relevant ? "books" : s.webResults?.length ? "web" : "none",
-                   chunks: s.chunks.map((c: any, i: number) => ({ n: i + 1, book: c.bookId, page: c.page, content: c.content })),
+                   chunks: s.chunks.map((c: any, i: number) => ({ n: i + 1, book: c.bookId, page: c.page, pageEnd: c.pageEnd, content: c.content })),
                    web: (s.webResults ?? []).map((w: any, i: number) => ({ n: `w${i + 1}`, url: w.url, title: w.title })) };
           controller.enqueue(enc.encode(JSON.stringify({ meta }) + "\n"));   // first frame
         }
@@ -856,13 +918,13 @@ Checkpoint: `curl -N -X POST localhost:3000/api/chat -d '{"conversationId":"c1",
 
 `app/page.tsx` creates a conversation id (`crypto.randomUUID()`) and redirects to `/c/[id]`. `app/c/[id]/page.tsx` is the chat: a text box, a list of turns, and for the in-progress answer a reader loop over the NDJSON stream that handles three frame kinds (`meta`, `token`, `done`).
 
-Rendering the answer: split on the citation regex and turn each `[n]` or `[wN]` into a button. Clicking a chunk citation opens a side panel with book, page and the chunk text from `meta`; clicking a web one opens the URL in a new tab. Strip any token the `done` frame listed as invalid. Show a badge from `meta.source`.
+Rendering the answer: split on the citation regex and turn each `[n]` or `[wN]` into a button. Clicking a chunk citation opens a side panel with book, page range and the chunk text from `meta`; clicking a web one opens the URL in a new tab. Strip any token the `done` frame listed as invalid. Show a badge from `meta.source`.
 
 History on refresh: on page load, read prior turns for the thread. The simplest route is a `GET /api/chat?conversationId=` that calls `graph.getState(cfg)` and returns `state.values.messages`.
 
 Keep it plain. No component library is needed; this is a demo, and a reviewer cares that citations open the right chunk, not that the buttons are pretty.
 
-Checkpoint: in the browser, ask an eval question; the answer streams visibly, each `[n]` opens a panel showing the right book and page, the badge says "from the books". Ask "what about the next chapter?"; the answer makes sense (and the `rewritten` field in your server log shows a concrete question). Refresh; the conversation is still there. Commit: `M4 chat UI`.
+Checkpoint: in the browser, ask an eval question; the answer streams visibly, each `[n]` opens a panel showing the right book and pages, the badge says "from the books". Ask "what about the next chapter?"; the answer makes sense (and the `rewritten` field in your server log shows a concrete question). Refresh; the conversation is still there. Commit: `M4 chat UI`.
 
 ### 5.7 Full-pipeline checks
 
@@ -889,15 +951,15 @@ If the first request on Vercel times out, the cause is almost always the checkpo
 
 Checkpoint: the live URL passes all four hand checks, and a `requests` row lands in Supabase for each. Commit: `M4 deployed`, and put the URL at the top of `README.md` right now, before anything else is written. This is the ship line.
 
-### 5.9 Step rows: migration 004 and capture
+### 5.9 Step rows: migration 005 and capture
 
 Do this after the ship line, not before. It is the follow-on in the spec's M4 section, and it comes before any stretch item.
 
 First, look at what you're about to store. Run `spike/run-graph.ts` three times: a normal question, "purple elevator tax" with `WEB_FALLBACK=off`, and the same with it on. Each printed update is one future row. Decide what goes in `detail` for each node; keep it to ids and short strings (the rewritten query, chunk ids, the grade's `relevant` and `reason`, web URLs), never chunk text, which is already in `chunks`.
 
-Create `migrations/004_request_steps.sql` with the `request_steps` table from `SPEC.md` section 5, adjusted for what you saw. Don't touch 001; it's applied.
+Create `migrations/005_request_steps.sql` with the `request_steps` table from `SPEC.md` section 5, adjusted for what you saw. Don't touch 001; it's applied.
 
-Checkpoint: `npm run migrate` prints `applied 004_request_steps.sql`. `psql $DATABASE_URL -c "\d request_steps"` shows the foreign key to `requests`.
+Checkpoint: `npm run migrate` prints `applied 005_request_steps.sql`. `psql $DATABASE_URL -c "\d request_steps"` shows the foreign key to `requests`.
 
 Now capture. The route's `streamEvents` loop already sees every node finish: the `on_chain_end` event for a node carries the same update that `streamMode: "updates"` prints. Add to the loop in `app/api/chat/route.ts`:
 

@@ -20,7 +20,7 @@ Pinned because langchain packages all depend on langchain core
 - resuming a thread starts a NEW run at START on top of saved state; DOES NOT RESUME LOOP 
 - reducers decide what happens with the output of a node; an overwrite replaces, an append accumulates
 - a default for a state field is what the field inits as
-- there's one checkpoint row per checkpoint step including START and END in the checkpoint table created by postgresql saver
+- there's one checkpoint row per checkpoint step including START in the checkpoint table created by postgresql saver
 - postgres has its own pool; setup() first then end() to disconnect pool
 
 ## Spike 1.4

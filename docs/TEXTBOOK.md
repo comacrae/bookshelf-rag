@@ -121,9 +121,9 @@ Cut at paragraph boundaries when you can. A paragraph is the author's own unit o
 
 ### 2.6 Page tags
 
-Every chunk must record which page it came from, or there are no citations. The rule the project uses: a chunk's page is the page of its first character. That is a choice. A chunk that starts at the bottom of page 51 and runs onto page 52 is tagged 51. The alternative (tag it with the page where most of its text lives) is defensible too; what matters is that you pick one, write it down, and make a test enforce it, because the eval set's page labels have to use the same rule.
+Every chunk must record which pages it came from, or there are no citations. The rule the project uses: a chunk stores a range, from the page of its first character to the page of its last. A chunk that starts at the bottom of page 51 and runs onto page 52 is tagged 51–52. That is a choice. The alternative (one page per chunk, either the first character's or the one where most of its text lives) is simpler, but it mislabels every chunk that crosses a page: the citation can send the reader to the wrong page, and the eval scores a correct retrieval as a miss when the answer is on the chunk's other page. Whichever you pick, write it down and make a test enforce it, because the eval's hit rule has to use the same definition.
 
-With overlap there's a subtlety: the overlap text at the start of a chunk came from the end of the previous chunk, and its page may differ from the first fresh paragraph. "Page of the first character" means the overlap's page. Decide and test it.
+With overlap there's a subtlety: the overlap text at the start of a chunk came from the end of the previous chunk, and its page may differ from the first fresh paragraph. "Page of the first character" means the overlap's page, so a chunk with overlap from page 7 and fresh text from page 8 is tagged 7–8. Decide and test it.
 
 ### 2.7 Worked example
 
@@ -137,10 +137,10 @@ page 2: "Branches are pointers to commits. Moving a branch is cheap."
 Paragraphs (one per sentence here, since there are no blank lines, treat each page as one paragraph; but to show the boundary case, treat each sentence as a paragraph): "Git stores snapshots." (4 tokens), "Each commit points to a tree." (7), "A tree lists files." (5), "Branches are pointers to commits." (6), "Moving a branch is cheap." (6).
 
 Chunk 0: sentences 1 and 2 (11 tokens; adding sentence 3 would make 16). Page 1.
-Chunk 1: sentences 3 and 4 (11 tokens). Page 1, because it starts with "A tree lists files" which is on page 1, even though "Branches are pointers" is on page 2.
+Chunk 1: sentences 3 and 4 (11 tokens). Pages 1–2, because it starts with "A tree lists files" on page 1 and ends with "Branches are pointers" on page 2.
 Chunk 2: sentence 5. Page 2.
 
-Notice chunk 1: a question about branches will retrieve it, the citation will say page 1, and the reader will find the sentence at the top of page 2. That is the cost of the "first character" rule and it is why the eval labels list both pages when an answer sits near a boundary.
+Notice chunk 1: a question about branches will retrieve it, the citation will say pages 1–2, and the reader will find the sentence at the top of page 2. The range costs the reader a little looking, but it is never wrong, and the eval counts the retrieval as a hit because page 2 is inside the range.
 
 ### 2.8 Toy problem
 
@@ -240,7 +240,7 @@ The only way to know is to decide, in advance, what the right answer is for a se
 
 ### 4.2 Recall@k
 
-Retrieval is a ranking problem: for a question, the system returns chunks in order. Recall@k asks: among the top k results, is at least one from a page we know holds the answer? Count the questions where the answer is yes, divide by the number of questions. The project uses k = 5 because five chunks is what the prompt gets.
+Retrieval is a ranking problem: for a question, the system returns chunks in order. Recall@k asks: among the top k results, does at least one cover a page we know holds the answer? Count the questions where the answer is yes, divide by the number of questions. The project uses k = 5 because five chunks is what the prompt gets.
 
 Recall is about misses. A system with 60% recall@5 fails to surface the answer for four questions in ten; no amount of prompt engineering fixes those four, because the model never sees the text.
 
@@ -834,9 +834,9 @@ Checkpoint: someone who hasn't seen the project can clone it, run the commands, 
 
 **2.8.** Sentences as paragraphs, tokens as words: "Rebasing rewrites history." (3), "Never rebase shared commits." (4), "It confuses collaborators." (3), "Merging preserves history." (3), "It creates a merge commit." (5).
 Chunk 0: sentences 1 to 3 (10 words), page 7.
-Chunk 1: overlap is the last 3 words of chunk 0, "It confuses collaborators." (page 7), plus sentence 4 (3 words, page 8), total 6; adding sentence 5 makes 11 > 10, so stop. Page 7, because the first character is the overlap text from page 7.
+Chunk 1: overlap is the last 3 words of chunk 0, "It confuses collaborators." (page 7), plus sentence 4 (3 words, page 8), total 6; adding sentence 5 makes 11 > 10, so stop. Pages 7–8, because the first character is the overlap text from page 7 and the last is sentence 4 on page 8.
 Chunk 2: overlap "Merging preserves history." (page 8) plus sentence 5 = 8 words. Page 8.
-The lesson: chunk 1's citation says page 7 but its fresh content is on page 8.
+The lesson: chunk 1's range starts on page 7 even though its fresh content is all on page 8.
 
 **3.6.** Cosine with q=(1,0): a = 1.0, c ≈ 0.707, b = 0, d = -1. Order: a, c, b, d. pgvector returns a first. Cosine ignores length (a and (2,0) are identical to it); Euclidean distance does not (|q−a| = 1, |q−(2,0)|... same here since a=(2,0); take a'=(5,0): cosine still 1, Euclidean 4).
 

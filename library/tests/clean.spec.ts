@@ -1,5 +1,5 @@
 import {describe, it,expect} from "vitest";
-import { removeHyphens } from "../src/clean";
+import { removeHyphens } from "../src/ingest/clean";
 
 describe("removeHyphens", () => {
     it("Joins a word across a line break", () => 

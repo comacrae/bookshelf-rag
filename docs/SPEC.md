@@ -36,11 +36,11 @@ The results table is what makes this a project rather than a demo.
 
 RAG (retrieval-augmented generation) means retrieving relevant text first and then having the model answer from that text only, so the answer can cite its source and can't invent facts.
 
-A chunk is a few hundred tokens of a book stored as one database row, with the book and page it came from.
+A chunk is a few hundred tokens of a book stored as one database row, with the book and the range of pages it came from.
 
 An embedding is a list of numbers a model produces from a piece of text. Texts with similar meaning get nearby vectors.
 
-Recall@5 is the fraction of eval questions for which at least one of the top five retrieved chunks comes from a page known to contain the answer.
+Recall@5 is the fraction of eval questions for which at least one of the top five retrieved chunks covers a page known to contain the answer.
 
 Hybrid retrieval merges keyword search and vector search into one ranking.
 
@@ -73,7 +73,7 @@ Two books, both free as PDF and licensed for redistribution:
 
 Confirm each license before ingesting and record it in `corpus/LICENSES.md`. The README states the corpus and licenses in one sentence. The project uses nothing purchased or DRM-protected.
 
-Known limitation: PDF text extraction mangles code blocks, hyphenated line breaks and running headers. Some eval questions about code will miss because of extraction, not retrieval. The error analysis in M2 labels those misses so they are not mistaken for retrieval bugs.
+Known limitation: PDF text extraction mangles code blocks, hyphenated line breaks and running headers, and it leaves no blank lines between paragraphs (none on any page of the four PDFs), so chunks are a fixed token window that can cut mid-sentence and can't follow the author's paragraphs. Some eval questions about code will miss because of extraction, not retrieval. The error analysis in M2 labels those misses so they are not mistaken for retrieval bugs.
 
 ## 4. Architecture
 
@@ -86,7 +86,7 @@ TypeScript. Next.js App Router. Postgres 16 with pgvector on Supabase. LangGraph
 | Component | Responsibility |
 |---|---|
 | `scripts/ingest.ts` | Read PDFs from `corpus/`, extract text per page, chunk, embed, insert. Safe to re-run. |
-| `src/chunker.ts` | Pure function: pages in, chunks with page numbers and overlap out. Unit-tested. |
+| `src/ingest/chunker.ts` | Pure function: pages in, chunks with page ranges and overlap out. Unit-tested. |
 | `src/retrieval.ts` | `vectorSearch`, `keywordSearch`, `hybridSearch` (reciprocal rank fusion). Hand-written SQL. |
 | `src/agent/graph.ts` | The LangGraph `StateGraph`: nodes, edges, checkpointer. |
 | `src/agent/nodes.ts` | `rewrite`, `retrieve`, `grade`, `webSearch`, `answer`. Each is a plain async function over state. |
@@ -160,6 +160,7 @@ CREATE TABLE chunks (
   id          bigserial PRIMARY KEY,
   book_id     text NOT NULL REFERENCES books(id),
   page        int  NOT NULL,       -- page of the chunk's first character
+  page_end    int  NOT NULL CHECK (page_end >= page),  -- page of the chunk's last character
   chunk_index int  NOT NULL,
   content     text NOT NULL,
   embedding   vector(DIM) NOT NULL,  -- DIM = embeddings model dimension; record the model in README
@@ -191,12 +192,12 @@ CREATE TABLE requests (                -- one row per answered question, for cos
 
 Migrations are numbered SQL files in `migrations/`, applied in order by `scripts/migrate.ts`. An applied migration is never edited; changes go in a new file.
 
-The tables above are `001_schema.sql`. One more table arrives later, as `004_request_steps.sql` in M4 (002 is the book rows, 003 the HNSW index). It is not in 001 on purpose: its columns are designed after looking at real `streamMode: "updates"` events, and since 001 will already be applied by then, it has to be a new file.
+The tables above are `001_schema.sql`, plus `page_end`, which `003_add_page_end.sql` adds because 001 was already applied. One more table arrives later, as `005_request_steps.sql` in M4 (002 is the book rows, 004 the HNSW index). It is not in 001 on purpose: its columns are designed after looking at real `streamMode: "updates"` events, and since 001 will already be applied by then, it has to be a new file.
 
 The rule for what goes where: a fact that happens once per question is a column on `requests`; a fact that happens several times per question (once per node run, once per attempt) is a row in a child table with a `request_id` foreign key. Each node execution is one row:
 
 ```sql
--- migrations/004_request_steps.sql. A starting point: finalize the columns after inspecting the update events.
+-- migrations/005_request_steps.sql. A starting point: finalize the columns after inspecting the update events.
 CREATE TABLE request_steps (           -- one row per node execution, so the UI can show how an answer was reached
   id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   request_id    bigint NOT NULL REFERENCES requests(id),
@@ -230,11 +231,11 @@ Accept when all four run. Surprises go in `docs/notes.md`.
 
 ### M1: ingest
 
-`scripts/ingest.ts <book-id>` extracts per page, calls `chunk(pages, { targetTokens: 400, overlapTokens: 60 })`, embeds in batches of 50, and inserts in transactions. Re-running a book deletes its chunks first.
+`scripts/ingest.ts <book-id>` extracts per page, numbers pages by their position in the PDF (first page = 1, never the printed number), drops front matter, rejoins words hyphenated across line breaks, calls `getChunks(pages, { targetTokens: 400, overlapTokens: 60 })`, embeds in batches of 50, and inserts in transactions. Re-running a book deletes its chunks first.
 
-The chunker splits on paragraph boundaries toward the target size, carries the page of the chunk's first character, overlaps consecutive chunks, and never crosses a book boundary. It has three tests: a page boundary inside a chunk, a paragraph larger than the target, and overlap length.
+The chunker slides a window of `targetTokens` over the book's tokens, moving forward `targetTokens - overlapTokens` each time. It carries the pages of the window's first and last tokens, and never crosses a book boundary. It has six tests: a page boundary inside a chunk, a chunk on a single page, the size limit, overlap length, an overlap that starts on an earlier page, and no overlap-only final chunk.
 
-Accept when both books are in `chunks`, `SELECT book_id, count(*) FROM chunks GROUP BY 1` looks right, three random chunks checked against the PDF are on the stated page, and the chunker tests pass.
+Accept when every row in `books` has chunks, `SELECT book_id, count(*) FROM chunks GROUP BY 1` looks right, three random chunks checked against the PDF start on `page` and end on `page_end`, a re-run leaves the counts unchanged, and the chunker tests pass.
 
 ### M2: eval set, baseline, error analysis
 
@@ -245,11 +246,11 @@ Accept when both books are in `chunks`, `SELECT book_id, count(*) FROM chunks GR
 { "id": "u01", "book": null, "question": "...", "answerPages": [], "expected": "not in corpus", "hard": false }
 ```
 
-Verify every `answerPages` entry against the PDF. Once committed, the file is frozen: any edit becomes `questions.v2.json`, and every results row records the version. The set never appears in any prompt.
+Verify every `answerPages` entry against the PDF, using PDF page positions as ingest does. Once committed, the file is frozen: any edit becomes `questions.v2.json`, and every results row records the version. The set never appears in any prompt.
 
 `evals/run.ts --method vector|keyword|hybrid --loop on|off --web off` reports:
 
-- Retrieval score. Over the 30 answerable questions, a hit is any of the top five chunks whose `(book, page)` is in the question's `(book, answerPages)`. The runner prints recall@5 and lists the misses.
+- Retrieval score. Over the 30 answerable questions, a hit is any of the top five chunks from the question's book whose range `page..page_end` includes at least one of its `answerPages`. The runner prints recall@5 and lists the misses.
 - Agent score, when `--loop on`. Runs the full graph with `WEB_FALLBACK=off` and records, per question, the final `source`, `attempts`, tokens and latency. Over the 5 unanswerable questions, the abstention rate is the fraction with `source = 'none'`. Over the 30 answerable questions, the false-abstain rate is the fraction with `source = 'none'`.
 - Grader accuracy, when `--loop on`. A 2×2 table of (retrieval hit?) against (grader said relevant?) over the 30 answerable questions.
 
@@ -284,7 +285,7 @@ Build `src/agent/graph.ts` as described in section 4. Add nodes one at a time. A
 - `src/citations.ts` exports `validateCitations(text, chunkIds, webIds)`, which returns the invalid tokens. One unit test: an id outside either set is flagged. The route strips invalid citations and counts them in `requests`.
 - The checkpointer is `PostgresSaver` from `@langchain/langgraph-checkpoint-postgres`, with `thread_id` set to the conversation id. Inspect what it writes per step and note it in `docs/graph.md`.
 - The route handler invokes the graph with the `thread_id` and `{ question, attempts: 0 }` as input, streams the `answer` node's tokens, sends source metadata (chunk ids, URLs, `source`) as the first frame, and writes a `requests` row when the stream ends, including `ttft_ms` (request start to first answer token) and `chat_model`. The eval runner passes the same input shape.
-- The UI has a question box, a streamed answer, a badge for books / web / none, `[n]` links that open a panel with book, page and chunk text, and `[wN]` links that open the URL. The conversation id lives in the URL so a refresh keeps history.
+- The UI has a question box, a streamed answer, a badge for books / web / none, `[n]` links that open a panel with book, page range and chunk text, and `[wN]` links that open the URL. The conversation id lives in the URL so a refresh keeps history.
 - Add eval rows for `--method hybrid --loop on --web off` (the full graph) and `--loop off` with the same method. The difference between those two recall@5 numbers is the measured value of the retry loop. Record grader accuracy, abstention and false-abstain.
 - Deploy: a Supabase project with pgvector, ingest run once from the laptop, Vercel on push. `WEB_FALLBACK=on` in production and `off` in eval. `.env.example` documents every variable.
 
@@ -303,7 +304,7 @@ This is the ship line. Put the link in the README and in applications.
 
 Built right after the ship line and before any section 8 stretch item. It never delays M2 or M3; the eval numbers come first. The point is to make the retry loop and the grader visible under each answer, which few portfolio agents show, and to give error analysis a per-step record.
 
-- Print a few real `streamMode: "updates"` events (normal question, retried question, web fallback) and finalize the `request_steps` columns from section 5 against them. Then add `migrations/004_request_steps.sql`.
+- Print a few real `streamMode: "updates"` events (normal question, retried question, web fallback) and finalize the `request_steps` columns from section 5 against them. Then add `migrations/005_request_steps.sql`.
 - Capture: the route already iterates the graph's events. Each node update becomes one step row with `seq`, `node`, `attempt`, a small `detail` object, the tokens of that node's model calls, and its wall time. Steps are held in memory and inserted after the `requests` row, in the same transaction, using its returned id.
 - UI: under each answer, a collapsed, read-only timeline with one line per step: node, attempt, a one-line summary from `detail` ("rewrote to …", "5 chunks", "not relevant: …", "3 web results"), and milliseconds. No graph rendering. A refresh shows the same timeline, read from `request_steps`.
 
@@ -319,7 +320,7 @@ The README is a single page with these sections, in this order:
 4. The results table from `evals/results.md`, in change order, with the eval version column.
 5. What the numbers say: three sentences on the biggest surprise, and one on whether the retry loop earned its cost.
 6. Error analysis: the miss buckets from M2 and what each one led to.
-7. Decisions, one short paragraph each, with the alternative named: chunk size; RRF over weighted sum; `ts_rank` over BM25; HNSW over IVFFlat; embedding model (cost, dimension, license); LangGraph's fixed graph over a free-form tool-calling loop; web fallback after retries rather than as a first-class source.
+7. Decisions, one short paragraph each, with the alternative named: chunk size; a fixed token window over packing whole sentences (simpler, but chunks can cut mid-sentence); a page range per chunk over a single page (a chunk can score a hit on a page where it holds only overlap text); RRF over weighted sum; `ts_rank` over BM25; HNSW over IVFFlat; embedding model (cost, dimension, license); LangGraph's fixed graph over a free-form tool-calling loop; web fallback after retries rather than as a first-class source.
 8. Known limitations: PDF extraction quality (code blocks), web answers are unverified, single tenant, no reranking yet.
 9. Hardest bug and how it was found.
 10. How AI was used in the build: what it helped with, what was written and reviewed by hand.
@@ -371,12 +372,12 @@ Only after M5, in order of value:
 │   ├── LICENSES.md
 │   ├── eloquent-js-4e.pdf
 │   └── pro-git-2e.pdf
-├── migrations/              001_schema.sql, 002_books.sql, 003_hnsw.sql, 004_request_steps.sql
+├── migrations/              001_schema.sql, 002_add_books.sql, 003_add_page_end.sql, 004_hnsw.sql, 005_request_steps.sql
 ├── scripts/
 │   ├── migrate.ts
 │   └── ingest.ts
 ├── src/
-│   ├── chunker.ts
+│   ├── ingest/          chunker.ts, clean.ts, fileReader.ts
 │   ├── retrieval.ts
 │   ├── citations.ts
 │   ├── db.ts
@@ -410,9 +411,12 @@ Only after M5, in order of value:
 
 | Test | Proves |
 |---|---|
-| chunker: page boundary inside a chunk | stored page is the first character's page |
-| chunker: paragraph larger than target | split, not emitted oversized |
+| chunker: page boundary inside a chunk | `page` is the first character's page, `page_end` the last character's |
+| chunker: chunk on one page | `page` equals `page_end` |
+| chunker: long text | no chunk exceeds the target |
 | chunker: overlap | consecutive chunks share `overlapTokens` |
+| chunker: overlap starting on an earlier page | `page` is the page where the overlap starts |
+| chunker: text that ends inside the first window | no extra chunk of only overlap |
 | rrf: item in only one list | fused and ordered correctly |
 | citations: id outside either set | flagged |
 | agent: grader always says no, `WEB_FALLBACK=off` (mocked) | exits after exactly `MAX_ATTEMPTS` with `source = 'none'` |
