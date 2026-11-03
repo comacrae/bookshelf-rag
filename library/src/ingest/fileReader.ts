@@ -1,13 +1,13 @@
 import { readFile } from "fs/promises";
 import {extractText, getDocumentProxy} from "unpdf";
-import { extractBody, removeHyphens } from "./clean";
+import { extractBody, removeHyphens, removeNulls } from "./clean";
 import type { Page } from "./chunker";
 import { join } from "path";
 /*
 *   Read in a pdf, remove the table of contents, clean the hyphens, and return the results as a list of strings
 */
 
-const CLEANING_FUNCTIONS = [removeHyphens];
+const CLEANING_FUNCTIONS = [removeHyphens, removeNulls];
 
 export async function readPages(filepath: string): Promise<Page[]> {
     /**

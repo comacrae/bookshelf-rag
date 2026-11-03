@@ -11,7 +11,7 @@ export const vectorize = async (bookSlug:string,chunks:Chunk[]):Promise<void> =>
     if(embeddingDim === undefined || Number.isNaN(embeddingDim))
         throw new Error('Embedding dim undefined in .env');
 
-    const model = new OpenAIEmbeddings({apiKey:process.env.OPENAI_API_KEY, model: process.env.EMBEDDING_MODEL});
+    const model = new OpenAIEmbeddings({apiKey:process.env.OPENAI_API_KEY, model: process.env.EMBEDDING_MODEL, dimensions: embeddingDim});
 
     const batchSize = 50;
 
@@ -23,24 +23,30 @@ export const vectorize = async (bookSlug:string,chunks:Chunk[]):Promise<void> =>
         const converted = await model.embedDocuments(batch);
         embeddings.push(...converted);
     }
-    console.log(embeddings.length, chunks.length, embeddings[0].length);
     // init db client
-    /*const client = await pool.connect();
+    const client = await pool.connect();
 
     try{
-        client.query('begin transaction;');
+        await client.query('begin transaction;');
         // clear table for given book
+        await client.query('delete from chunks where book_id = $1',[bookSlug]);
 
-        // for each embedding batch
-            
-            //get embeddings
+        // for each chunk
+        for(let i = 0; i < embeddings.length; i++){
+            // get chunk
+            const chunk = chunks[i];
+            const emb = embeddings[i];
+        // populate table
+            await client.query('insert into chunks (book_id, page, page_end, chunk_index, content, embedding) values ($1,$2,$3,$4,$5,$6)', 
+                [bookSlug,chunk.page, chunk.pageEnd, chunk.chunkIndex, chunk.content, pgvector.toSql(emb)]
+            );
+        }
 
-            // populate table
-
+        await client.query('commit');
     }catch(err){
-        client.query('rollback');
+        await client.query('rollback');
+        throw err;
     }finally{
-        await client.end();
-    }*/
-    
+        client.release();
+    }
 }

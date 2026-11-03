@@ -2,9 +2,13 @@ import { readPages, cleanPdf } from "../src/ingest/fileReader";
 import { getChunks } from "../src/ingest/chunker";
 import type { Chunk, ChunkOpts} from "../src/ingest/chunker";
 import { vectorize } from "@/src/ingest/vectorize";
+import {pool} from "../src/db";
 
 const FILES = [
-    {name: "eloquent-js-4e.pdf", start:25, end:407}
+    {name: "eloquent-js-4e.pdf", start:25, end:431},
+    {name: "algorithms-erickson.pdf", start:19, end:446},
+    {name: "ostep.pdf", start:22, end:675},
+    {name: "pro-git-2e.pdf", start:16, end:498}
 ];
 
 
@@ -36,4 +40,7 @@ export async function main() {
     }
 };
 
-main().then(()=>console.log('completed'));
+main().then(()=>{
+    pool.end();
+    console.log('COMPLETED')
+});
