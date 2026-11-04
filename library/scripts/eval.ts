@@ -1,11 +1,10 @@
 import {readFile} from "fs/promises";
 import { vectorSearch } from "@/src/retrieval";
-import { join } from "path";
 import { pool} from "@/src/db";
 
 type Question = {
     id:string,
-    book:string,
+    book:string|null,
     question:string,
     answerPages:number[],
     expected:string,
@@ -26,10 +25,14 @@ type Result = Question & {
     hasHit:boolean
 }
 
+const getArgOrDefault = (flag:string,defaultVal:string) => {
+    const i = process.argv.indexOf(flag);
+    return i > -1  ? process.argv[i + 1]: defaultVal;
+};
 
 const main = async () => {
-    const questionsFilepath= process.argv[3] ?? "evals/questions.v1.json";
-    const topN = Number(process.argv[4]) ?? 5;
+    const questionsFilepath= getArgOrDefault("--eval", "evals/questions.v1.json");
+    const topN = 5;
     const file = await readFile(questionsFilepath, "utf-8");
     const questions:Question[] = JSON.parse(file).filter((q:Question) => q.book !== null); // only questions that can be actually answered
     const results: Result[] = [];
