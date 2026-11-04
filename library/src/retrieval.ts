@@ -11,7 +11,7 @@ export type Hit = {
     score:number
 }
 
-export const getTopN = async (n:number, query:string) : Promise<Hit[]> => {
+export const vectorSearch = async ( query:string, n:number) : Promise<Hit[]> => {
 
     // get embedding of query
     const emb = await model.embedQuery(query);
@@ -21,7 +21,7 @@ export const getTopN = async (n:number, query:string) : Promise<Hit[]> => {
         const result = await pool.query<{id:string,book_id:string,page:number,page_end:number,content:string,score:number}>(`
             select id, book_id, page, page_end, content, 1 - (embedding <=> $1) as score  
             from chunks
-            order by score desc
+            order by embedding <=> $1 asc
             limit $2;
             `,[pgvector.toSql(emb), n])
 
