@@ -1,5 +1,5 @@
 import {readFile} from "fs/promises";
-import { vectorSearch } from "@/src/retrieval";
+import { hybridSearch } from "@/src/retrieval";
 import { pool} from "@/src/db";
 
 type Question = {
@@ -40,7 +40,7 @@ const main = async () => {
 
     for(const q of questions){
         // get topN results 
-        const chunksReturned = await vectorSearch(q.question, topN);
+        const chunksReturned = await hybridSearch(q.question, topN);
         let hasHit = false;
         // are there any chunks that are from the expected book and page range? If yes, it's a hit
         const comparisons:ChunkComparison[] = chunksReturned.map((chunk) =>{
