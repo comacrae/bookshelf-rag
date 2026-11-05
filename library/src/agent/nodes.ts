@@ -5,13 +5,19 @@ import { tool } from "@langchain/core/tools";
 import type { S } from "./state";
 import { hybridSearch } from "../retrieval"
 import type { Hit } from "../retrieval";
-;
+
 // chat model returns structured output {rewritten:"...")} and will retry once if model output != schema
 const extractor = chatModel.withStructuredOutput(z.object({rewritten: z.string()})).withRetry({stopAfterAttempt:2});
+const grader = chatModel.withStructuredOutput(z.object({relevant:z.boolean(), gradeReason:z.string()})).withRetry({stopAfterAttempt:2});
 
 export const rewrite = async (state:S) : Promise<{rewritten:string}> => {
     /*Takes a question and rewords it using conversation history */
-    const instructions = "Rewrite the user's question so it makes sense on its own";
+    let instructions = "Rewrite the user's question so it makes sense on its own.";
+
+    // if this is the same turn, add the failure reason to the instruction context
+    if(state.gradeReason && state.attempts > 0)
+        instructions += ` Your previous rewrite was ${state.rewritten}. Here is why the previous attempt failed: ${state.gradeReason}. Use different wording.`;
+        
     const earlierMessages = state.messages;
     const newQuestion = state.question;
 
@@ -24,8 +30,22 @@ const searchChunks = tool(async ({query}) => hybridSearch(query,5), {name:"searc
 export const retrieve = async (state:S): Promise<{chunks:Hit[]}> => {
     /*Fetch related chunks using the rewritten question */
     return {chunks:await searchChunks.invoke({query:state.rewritten})}
-}
+};
+
+export const grade = async(state:S): Promise<{relevant:boolean, gradeReason:string, attempts:number}> => {
+    /**Takes the current chunks fetched, passes them to the LLM and asks for a determiniation as 
+     * to whether the chunks are relevant with a reason behind the score, and passes the incremented number of attempts.
+     */
+    const instructions = "Given a selection of text excerpts in the format [<citation_number>] (<book_slug>, <page_range>) <text>, determine if the chunks can answer the given question. Give your reason in one sentence.";
+    const formattedChunks:string = state.chunks.map((chunk:Hit, idx) => `[${idx + 1}] (${chunk.bookId} pp.${chunk.page}-${chunk.pageEnd}) ${chunk.content}`).join("\n\n");
+    const results = await grader.invoke(
+        [new SystemMessage(instructions), 
+        new HumanMessage(`Question: ${state.rewritten}\n\nExcerpts:\n${formattedChunks}`)]
+    );
+    return {relevant:results.relevant, gradeReason:results.gradeReason, attempts:state.attempts + 1};
+};
+
 async function main() {
-console.log(await retrieve({ rewritten: "how do I turn it on?", messages: [] } as S));
+    console.log(await rewrite({ question: "how do I turn on rerere?", messages: [], attempts: 1, rewritten: "How do I turn on rerere ", gradeReason: "excerpts cover merge conflicts, not the setting" } as S));
 }
 main().then(()=>{});
