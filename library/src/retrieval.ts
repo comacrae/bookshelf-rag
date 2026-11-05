@@ -30,3 +30,52 @@ export const vectorSearch = async ( query:string, n:number) : Promise<Hit[]> => 
 
 }
 
+export const keywordSearch = async ( keywords:string, n:number) : Promise<Hit[]> => {
+    
+    // tsquery higher secore is better so we sort desc
+    const result = await pool.query<{id:string,book_id:string,page:number,page_end:number,content:string,score:number}>(`
+        select id, book_id, page,page_end, content, ts_rank(tsv, replace(websearch_to_tsquery('english', $1)::text, ' & ', ' | ')::tsquery) as score   
+        from chunks
+        where tsv @@ replace(websearch_to_tsquery('english', $1)::text, ' & ', ' | ')::tsquery
+        order by score desc
+        limit $2
+        `,[keywords, n])
+
+    // coerce to Hit and return
+    return result.rows.map((hit) => ({id:hit.id, bookId:hit.book_id, page:hit.page, pageEnd:hit.page_end, content:hit.content, score:hit.score}));
+
+}
+
+export const rrf = (lists:Hit[][],k=60): Hit[] =>  {
+    /**
+     * Perform reciprocal rank fusion to get hits ranked by different scoring metrics
+     */
+    //make an empty points table
+    const points = new Map<string, number>(); //<chunkId, score>
+    const hitsMap = new Map<string, Hit>();
+    // for each list
+    for(const list of lists){
+        // for each chunk
+        for(const [idx, chunk] of list.entries()){
+            //add score for that chunk = 1 / (k + chunk's position in list)
+            hitsMap.set(chunk.id,chunk);
+            const existingScore = points.get(chunk.id) ?? 0;
+            const score = 1 / (k + idx + 1);
+            points.set(chunk.id, (existingScore + score ));
+        }
+    }
+
+    return [...points.entries()]
+    .sort((a,b)=> b[1] - a[1]) // sort by score desc
+    .map(([chunkIdx, score]) => ({...hitsMap.get(chunkIdx)!, score}));
+}
+
+export const hybridSearch = async (query:string, n:number) :Promise<Hit[]> => {
+    const results =  await Promise.all([
+        vectorSearch(query, n),
+        keywordSearch(query,n)]
+    );
+    return rrf(results).slice(0,n);
+}
+
+
