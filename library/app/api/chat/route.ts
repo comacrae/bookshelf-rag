@@ -10,7 +10,7 @@ const chatRequest = z.object({
     webFallback:z.boolean().optional(),
     topK:z.number().int().min(1).max(10).optional()
 });
-
+type ChatInput = {conversationId: string, question:string, webFallback:boolean, topK:number};
 type MetaChunk = { n: number; book: string; page: number; pageEnd: number; content: string };
 type MetaWeb   = { n: string; url: string; title: string };          // n is "w1", "w2"...
 
@@ -20,6 +20,70 @@ export type Frame =
   | { done: true; invalid: string[] }                                    // sent once, last
   | { error: string };                                                   // only if something breaks
 
+
+async function runChat(input:ChatInput, emit:(f:Frame)=>void){
+    const {question, conversationId, topK, webFallback} = input;
+    const startTime = Date.now();
+
+    // helper to convert each frame returned from model stream to an ndjson line
+    let chunks:Hit[] = []; // raw results from retrieval node
+    let webResults:WebResult[] = []; // raw results from websearch node
+    let relevant:boolean = false;
+    let attempts:number = 0;
+    let source: Source = "none";
+    let text: string = "";
+    let ttft: number | null = null; // time to first token
+    let metaSent: boolean = false; // has the meta frame gone out yet
+    let inputTokens: number = 0;
+    let outputTokens: number = 0;
+    const graph = await getGraph();
+
+
+    const hooks = [{
+        handleLLMEnd(out:any){
+            console.log(JSON.stringify(out.llmOutput))
+        }
+    }];
+
+    const mapChunks = (chunks:Hit[]):MetaChunk[] => chunks.map((ch,idx)=>({
+        n:idx+1,
+        book:ch.bookId,
+        page:ch.page,
+        pageEnd:ch.pageEnd,
+        content:ch.content
+    }));
+
+    const mapWebResults = (webResults:WebResult[]):MetaWeb[] => webResults.map((w,idx)=>({
+        n:`w${idx+1}`,
+        url:w.url,
+        title:w.title
+    }));
+
+    const buildMeta = () :Frame => {
+        return {
+            meta:{ 
+                source: relevant? "books" : webResults.length > 0 ? "web" : "none", 
+                chunks: mapChunks(chunks),
+                web: mapWebResults(webResults)
+            }
+        }
+    };
+
+    const events = await graph.stream(
+        {question, attempts:0, webResults:[]},
+        {
+            streamMode:["updates","messages"],
+            configurable: {thread_id:conversationId},
+            context: {webFallback, topK},
+            callbacks: hooks,
+            recursionLimit:25
+        }
+    );
+
+    for await (const [mode, payload] of events){
+        console.log(mode, JSON.stringify(payload).slice(0,150));
+    }
+}
 
 export async function POST(req:Request){
     let body:unknown;
@@ -41,46 +105,20 @@ export async function POST(req:Request){
     const topK = parsed.data.topK ?? config.RETRIEVAL_TOP_K;
 
     //get graph, text encoder, and start time of query
-    const startTime = Date.now();
-    const graph = await getGraph();
     const encoder = new TextEncoder();
 
     // set up response stream
     const resBody = new ReadableStream({
         async start(controller){
-            // helper to convert each frame returned from model stream to an ndjson line
             const emit = (e:Frame) => controller.enqueue(encoder.encode(JSON.stringify(e) + "\n"));
-            let chunks:Hit[] = []; // raw results from retrieval node
-            let webResults:WebResult[] = []; // raw results from websearch node
-            let relevant:boolean = false;
-            let attempts:number = 0;
-            let source: Source = "none";
-            let text: string = "";
-            let ttft: number | null = null; // time to first token
-            let metaSent: boolean = false; // has the meta frame gone out yet
-            let inputTokens: number = 0;
-            let outputTokens: number = 0;
+            try{
+                await runChat({conversationId, question,webFallback,topK},emit);
+            }finally{
+                controller.close();
+            }
+        }
+    });
 
-            const hooks = [{handleLLMEnd(out:any){
-                console.log(JSON.stringify(out.llmOutput))
-            }}];
-
-            const buildMeta = () :Frame => ({
-                meta:{ 
-                    source: relevant? "books" : webResults.length > 0 ? "web" : "none", 
-                    chunks: chunks.map((ch,idx)=>({
-                        n:idx+1,
-                        book:ch.bookId,
-                        page:ch.page,
-                        pageEnd:ch.pageEnd,
-                        content:ch.content
-                    })),
-                    web: webResults.map((w,idx)=>({
-                        n:`w${idx+1}`,
-                        url:w.url,
-                        title:w.title
-                    }))
-                }}
-            )}
-    })
+    return new Response(resBody, {headers: {"Content-Type": "application/x-ndjson"}});
 };
+
