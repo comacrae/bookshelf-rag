@@ -8,7 +8,7 @@ const loadConfig = (): Config => {
     if(!["true","false"].includes(webFallback))
         throw new Error(`Invalid value for WEB_FALLBACK envvar ${webFallback}`)
 
-    const WEB_FALLBACK:boolean = webFallback === "false";
+    const WEB_FALLBACK:boolean = webFallback === "true";
 
     const topK = Number(process.env.RETRIEVAL_TOP_K) ?? "5";
     if(!Number.isInteger(topK) || topK < 1 )

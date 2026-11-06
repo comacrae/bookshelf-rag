@@ -32,7 +32,7 @@ export const rewrite = async (state:S) : Promise<{rewritten:string}> => {
     return result;
 }
 
-const searchChunks = tool(async ({query, topK}: {query:string, topK:number}) => hybridSearch(query,topK), {name:"search_books",description:"Search book chunks via hybrid search",schema: z.object({query:z.string()})})
+const searchChunks = tool(async ({query, topK}: {query:string, topK:number}) => hybridSearch(query,topK), {name:"search_books",description:"Search book chunks via hybrid search",schema: z.object({query:z.string(), topK:z.number()})});
 
 export const retrieve = async (state:S, runtime:Runtime<Ctx>): Promise<{chunks:Hit[]}> => {
     /*Fetch related chunks using the rewritten question */
@@ -69,13 +69,13 @@ export const answer = async(state:S): Promise<{source:Source, messages:BaseMessa
         const response = await chatModel.invoke([new SystemMessage(instructions), new HumanMessage(`Query: ${state.rewritten}`)]);
 
         return {source:source, messages: [new HumanMessage(state.question), response]}
-    }else if (state.webResults.length > 0 && state.attempts > 3){
+    }else if (state.webResults.length > 0){
         //use web results if fallback occurred
         source = 'web';
 
         const webResults = getFormattedWebResults(state);
 
-        const instructions = `Respond to the following query. You are given a selection of web search results in the format [<citation_number>] Title: <title> <content> URL:<url>. Only use the search results to answer the question and cite after each sentence in the format <claim> [<citation_number>]. At the end of the response, include the URLs in a bullet point format for the sources that you cited. Make it clear that you used web search as a fallback. Don't use any other citation format.\n\nExcerpts:\n${webResults}`;
+        const instructions = `Respond to the following query. You are given a selection of web search results in the format [<citation_number>] Title: <title> <content> URL:<url>. Only use the search results to answer the question and cite after each sentence in the format <claim> [<citation_number>]. State in the first sentence that the books did not cover the given query and that you used web search as a fallback. Don't use any other citation format.\n\nExcerpts:\n${webResults}`;
 
         const response = await chatModel.invoke([new SystemMessage(instructions), new HumanMessage(`Query: ${state.rewritten}`)]);
 
