@@ -4,6 +4,9 @@ import type {S,Ctx} from "./state";
 import { rewrite,retrieve,webSearch,grade, answer } from "./nodes";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import {config as envConfig} from "../config";
+import { pool } from "../db";
+
+let cached: ReturnType<typeof buildGraph> | undefined;
 
 const afterGrade = (state:S, graphConfig:LangGraphRunnableConfig<Ctx>): "rewrite" | "answer" | "webSearch" => {
     /*Takes whether the current turn returned  relevant chunk(s) and depending on web fall back setting 
@@ -18,7 +21,7 @@ const afterGrade = (state:S, graphConfig:LangGraphRunnableConfig<Ctx>): "rewrite
     return "answer";
 }
 
-export const buildGraph = (checkpointer?:PostgresSaver) => {
+const buildGraph = (checkpointer?:PostgresSaver) => {
     return new StateGraph(ConversationState,GraphContext)
     .addNode("rewrite", rewrite)
     .addNode("retrieve",retrieve)
@@ -32,4 +35,14 @@ export const buildGraph = (checkpointer?:PostgresSaver) => {
     .addEdge("answer", END)
     .addConditionalEdges("grade", afterGrade, {rewrite:"rewrite",answer:"answer",webSearch:"webSearch"})
     .compile({checkpointer});
+}
+
+export const getGraph = async () => {
+    //build and cache graph if it doesnt exist; else return cached graph
+    if(!cached){
+    const checkpointer = new PostgresSaver(pool);
+    await checkpointer.setup();
+    cached = buildGraph(checkpointer);
+    }
+    return cached;
 }
