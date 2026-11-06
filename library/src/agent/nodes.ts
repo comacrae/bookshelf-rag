@@ -75,7 +75,7 @@ export const answer = async(state:S): Promise<{source:Source, messages:BaseMessa
 
         const webResults = getFormattedWebResults(state);
 
-        const instructions = `Respond to the following query. You are given a selection of web search results in the format [<citation_number>] Title: <title> <content> URL:<url>. Only use the search results to answer the question and cite after each sentence in the format <claim> [<citation_number>]. State in the first sentence that the books did not cover the given query and that you used web search as a fallback. Don't use any other citation format.\n\nExcerpts:\n${webResults}`;
+        const instructions = `Respond to the following query. You are given a selection of web search results in the format [<citation_number>] Title: <title> <content> URL:<url>. Only use the search results to answer the question and cite after each sentence in the format <claim> [w<citation_number>]. For example, [w1],[w2], etc. State in the first sentence that the books did not cover the given query and that you used web search as a fallback. Don't use any other citation format.\n\nExcerpts:\n${webResults}`;
 
         const response = await chatModel.invoke([new SystemMessage(instructions), new HumanMessage(`Query: ${state.rewritten}`)]);
 
@@ -97,9 +97,3 @@ export const webSearch = async (state:S): Promise<{webResults:WebResult[]}> => {
 
     return {webResults: parsed.data.results}
 }
-
-
-const main = async () => {
-    console.log(await webSearch({ rewritten: "how to center a div with CSS" } as S));
-};
-main().then();

@@ -10,7 +10,7 @@ const loadConfig = (): Config => {
 
     const WEB_FALLBACK:boolean = webFallback === "true";
 
-    const topK = Number(process.env.RETRIEVAL_TOP_K) ?? "5";
+    const topK = Number(process.env.RETRIEVAL_TOP_K ?? "5");
     if(!Number.isInteger(topK) || topK < 1 )
         throw new Error(`Invalid value for RETRIEVAL_TOP_K envvar ${process.env.RETRIEVAL_TOP_K}`)
 
