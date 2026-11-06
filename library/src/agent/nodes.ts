@@ -2,16 +2,20 @@ import z from "zod";
 import {chatModel} from "../model";
 import { SystemMessage, HumanMessage, AIMessage } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
-import type { S, Source } from "./state";
+import type { S, Source, Ctx, WebResult} from "./state";
 import { hybridSearch } from "../retrieval"
 import type { Hit } from "../retrieval";
 import type { BaseMessage } from "@langchain/core/messages";
+import type { Runtime } from "@langchain/langgraph";
+import { config } from "../config";
+import {tavily, TavilyResponse} from "../tavily";
 
 // chat model returns structured output {rewritten:"...")} and will retry once if model output != schema
 const extractor = chatModel.withStructuredOutput(z.object({rewritten: z.string()})).withRetry({stopAfterAttempt:2});
 const grader = chatModel.withStructuredOutput(z.object({relevant:z.boolean(), gradeReason:z.string()})).withRetry({stopAfterAttempt:2});
 
 const getFormattedChunks = (state:S):string =>  state.chunks.map((chunk:Hit, idx) => `[${idx + 1}] (${chunk.bookId} pp.${chunk.page}-${chunk.pageEnd}) ${chunk.content}`).join("\n\n");
+const getFormattedWebResults = (state:S):string => state.webResults.map((result, idx) => `[w${idx + 1}] Title: ${result.title} ${result.content} URL:${result.url}`).join("\n\n");
 
 export const rewrite = async (state:S) : Promise<{rewritten:string}> => {
     /*Takes a question and rewords it using conversation history */
@@ -28,11 +32,11 @@ export const rewrite = async (state:S) : Promise<{rewritten:string}> => {
     return result;
 }
 
-const searchChunks = tool(async ({query}) => hybridSearch(query,5), {name:"search_books",description:"Search book chunks via hybrid search",schema: z.object({query:z.string()})})
+const searchChunks = tool(async ({query, topK}: {query:string, topK:number}) => hybridSearch(query,topK), {name:"search_books",description:"Search book chunks via hybrid search",schema: z.object({query:z.string()})})
 
-export const retrieve = async (state:S): Promise<{chunks:Hit[]}> => {
+export const retrieve = async (state:S, runtime:Runtime<Ctx>): Promise<{chunks:Hit[]}> => {
     /*Fetch related chunks using the rewritten question */
-    return {chunks:await searchChunks.invoke({query:state.rewritten})}
+    return {chunks:await searchChunks.invoke({query:state.rewritten, topK:runtime.context?.topK ?? config.RETRIEVAL_TOP_K})};
 };
 
 export const grade = async(state:S): Promise<{relevant:boolean, gradeReason:string, attempts:number}> => {
@@ -65,18 +69,37 @@ export const answer = async(state:S): Promise<{source:Source, messages:BaseMessa
         const response = await chatModel.invoke([new SystemMessage(instructions), new HumanMessage(`Query: ${state.rewritten}`)]);
 
         return {source:source, messages: [new HumanMessage(state.question), response]}
-    }else if (state.webResults.length > 0){
-        //TODO: web
+    }else if (state.webResults.length > 0 && state.attempts > 3){
+        //use web results if fallback occurred
+        source = 'web';
+
+        const webResults = getFormattedWebResults(state);
+
+        const instructions = `Respond to the following query. You are given a selection of web search results in the format [<citation_number>] Title: <title> <content> URL:<url>. Only use the search results to answer the question and cite after each sentence in the format <claim> [<citation_number>]. At the end of the response, include the URLs in a bullet point format for the sources that you cited. Make it clear that you used web search as a fallback. Don't use any other citation format.\n\nExcerpts:\n${webResults}`;
+
+        const response = await chatModel.invoke([new SystemMessage(instructions), new HumanMessage(`Query: ${state.rewritten}`)]);
+
+        return {source:source, messages: [new HumanMessage(state.question), response]}
     }
 
     return {source:source, messages: [new HumanMessage(state.question),new AIMessage("The books don't cover this.")]};
     
 }
 
-async function main() {
-    const s = { question: "how does a ticket lock work?", rewritten: "How does a ticket lock work?", attempts: 0, messages: [] } as S;
-    s.chunks = (await retrieve(s)).chunks;
-    console.log(await answer({ ...s, relevant: true }));
-    console.log(await answer({ ...s, relevant: false, webResults: [] }));   // expect source: 'none', "The books 
+export const webSearch = async (state:S): Promise<{webResults:WebResult[]}> => {
+    const response = await tavily.invoke({query:state.rewritten});
+    const parsed = TavilyResponse.safeParse(response);
+    let results: WebResult[] = [];
+
+    if(parsed.error){
+        return {webResults:results};
+    }
+
+    return {webResults: parsed.data.results}
 }
-main().then(()=>{});
+
+
+const main = async () => {
+    console.log(await webSearch({ rewritten: "how to center a div with CSS" } as S));
+};
+main().then();

@@ -25,3 +25,10 @@ export const ConversationState = Annotation.Root({
 });
 
 export type S = typeof ConversationState.State;
+
+export const GraphContext = Annotation.Root({
+    webFallback:Annotation<boolean>,
+    topK:Annotation<number>
+});
+
+export type Ctx = typeof GraphContext.State;
