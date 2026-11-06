@@ -59,8 +59,28 @@ export async function POST(req:Request){
             let ttft: number | null = null; // time to first token
             let metaSent: boolean = false; // has the meta frame gone out yet
             let inputTokens: number = 0;
-            let outputTokens: number = 0; 
+            let outputTokens: number = 0;
 
-        }
+            const hooks = [{handleLLMEnd(out:any){
+                console.log(JSON.stringify(out.llmOutput))
+            }}];
+
+            const buildMeta = () :Frame => ({
+                meta:{ 
+                    source: relevant? "books" : webResults.length > 0 ? "web" : "none", 
+                    chunks: chunks.map((ch,idx)=>({
+                        n:idx+1,
+                        book:ch.bookId,
+                        page:ch.page,
+                        pageEnd:ch.pageEnd,
+                        content:ch.content
+                    })),
+                    web: webResults.map((w,idx)=>({
+                        n:`w${idx+1}`,
+                        url:w.url,
+                        title:w.title
+                    }))
+                }}
+            )}
     })
 };
