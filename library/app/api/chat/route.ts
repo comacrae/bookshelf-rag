@@ -137,10 +137,10 @@ async function runChat(input:ChatInput, emit:(f:Frame)=>void){
         const elapsed = Date.now() - startTime;
         const reason = err instanceof Error ? err.message : String(err);
         await pool.query(`
-            insert into requests (conversation_id, question, input_tokens, output_tokens, attempts, latency_ms, ttft_ms, web_calls, invalid_citations, source, chat_model,status)
+            insert into requests (conversation_id, question, input_tokens, output_tokens, attempts, latency_ms, ttft_ms, web_calls, invalid_citations, source, chat_model,status, error_message)
             values
-            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            `,[conversationId,question,inputTokens,outputTokens,attempts,ttft,ttft ?? elapsed, tavilyCounter,0,source,process.env.CHAT_MODEL, "error", reason]);
+            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,$13)
+            `,[conversationId,question,inputTokens,outputTokens,attempts,elapsed,ttft ?? elapsed, tavilyCounter,0,source,process.env.CHAT_MODEL, "error", reason]);
             throw err;
     }
 }
