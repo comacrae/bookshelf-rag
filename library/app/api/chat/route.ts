@@ -3,6 +3,8 @@ import { config } from "@/src/config";
 import { getGraph } from "@/src/agent/graph";
 import type { WebResult, Source} from "@/src/agent/state";
 import type { Hit } from "@/src/retrieval";
+import { validateCitations } from "@/src/citations";
+import { pool } from "@/src/db";
 
 const chatRequest = z.object({
     conversationId:z.string().min(1), 
@@ -36,6 +38,7 @@ async function runChat(input:ChatInput, emit:(f:Frame)=>void){
     let metaSent: boolean = false; // has the meta frame gone out yet
     let inputTokens: number = 0;
     let outputTokens: number = 0;
+    let tavilyCounter: number = 0; // track number of tavily runs
     const graph = await getGraph();
 
 
@@ -69,7 +72,7 @@ async function runChat(input:ChatInput, emit:(f:Frame)=>void){
             }
         }
     };
-
+    try{
     const events = await graph.stream(
         {question, attempts:0, webResults:[]},
         {
@@ -86,9 +89,10 @@ async function runChat(input:ChatInput, emit:(f:Frame)=>void){
             const [nodeName, update] = Object.entries(payload)[0] as [string,any];
             if(nodeName === "retrieve")
                 chunks = update.chunks;
-            else if (nodeName === "webSearch")
+            else if (nodeName === "webSearch"){
                 webResults = update.webResults;
-            else if (nodeName === "grade"){
+                tavilyCounter +=1;
+            }else if (nodeName === "grade"){
                 relevant = update.relevant;
                 attempts = update.attempts;
             }else if (nodeName === "answer"){
@@ -113,8 +117,31 @@ async function runChat(input:ChatInput, emit:(f:Frame)=>void){
             text += messageText;
             emit({token: messageText})
         }
+    }
 
+    //validate citations
+    const chunkIds:string[] = chunks.map((_,i) =>`${i+1}`);
+    const webIds:string[] = webResults.map((_,i) =>`w${i+1}`);
 
+    const {invalid} = validateCitations(text,chunkIds,webIds);
+    emit({done:true, invalid});
+
+    
+    const elapsed = Date.now() - startTime;
+    await pool.query(`
+        insert into requests (conversation_id, question, input_tokens, output_tokens, attempts, latency_ms, ttft_ms, web_calls, invalid_citations, source, chat_model,status)
+        values
+        ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        `,[conversationId,question,inputTokens,outputTokens,attempts,elapsed,ttft ?? elapsed, tavilyCounter,invalid.length,source,process.env.CHAT_MODEL, "ok"]);
+    }catch(err){
+        const elapsed = Date.now() - startTime;
+        const reason = err instanceof Error ? err.message : String(err);
+        await pool.query(`
+            insert into requests (conversation_id, question, input_tokens, output_tokens, attempts, latency_ms, ttft_ms, web_calls, invalid_citations, source, chat_model,status)
+            values
+            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            `,[conversationId,question,inputTokens,outputTokens,attempts,ttft,ttft ?? elapsed, tavilyCounter,0,source,process.env.CHAT_MODEL, "error", reason]);
+            throw err;
     }
 }
 
@@ -146,6 +173,8 @@ export async function POST(req:Request){
             const emit = (e:Frame) => controller.enqueue(encoder.encode(JSON.stringify(e) + "\n"));
             try{
                 await runChat({conversationId, question,webFallback,topK},emit);
+            }catch(err){
+                {console.log(err); emit({error: "Something went wrong"});}
             }finally{
                 controller.close();
             }
