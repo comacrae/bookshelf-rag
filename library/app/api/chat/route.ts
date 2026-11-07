@@ -41,7 +41,8 @@ async function runChat(input:ChatInput, emit:(f:Frame)=>void){
 
     const hooks = [{
         handleLLMEnd(out:any){
-            console.log(JSON.stringify(out.llmOutput))
+            inputTokens += out.llmOutput?.tokenUsage.promptTokens ?? 0;
+            outputTokens += out.llmOutput?.tokenUsage.completionTokens ?? 0;
         }
     }];
 
@@ -63,8 +64,8 @@ async function runChat(input:ChatInput, emit:(f:Frame)=>void){
         return {
             meta:{ 
                 source: relevant? "books" : webResults.length > 0 ? "web" : "none", 
-                chunks: mapChunks(chunks),
-                web: mapWebResults(webResults)
+                chunks: relevant? mapChunks(chunks): [],
+                web: !relevant? mapWebResults(webResults): []
             }
         }
     };
@@ -81,7 +82,39 @@ async function runChat(input:ChatInput, emit:(f:Frame)=>void){
     );
 
     for await (const [mode, payload] of events){
-        console.log(mode, JSON.stringify(payload).slice(0,150));
+        if(mode === "updates"){
+            const [nodeName, update] = Object.entries(payload)[0] as [string,any];
+            if(nodeName === "retrieve")
+                chunks = update.chunks;
+            else if (nodeName === "webSearch")
+                webResults = update.webResults;
+            else if (nodeName === "grade"){
+                relevant = update.relevant;
+                attempts = update.attempts;
+            }else if (nodeName === "answer"){
+                source = update.source;
+            }
+        }else if(mode === "messages"){
+            const [msg, meta] = payload;
+            if(meta.langgraph_node != "answer" || msg.type != "ai")
+                continue;
+            const messageText = String(msg.content);
+            if(!messageText)
+                continue;
+
+            // if first peice sent in stream, send meta, record meta as sent
+            if(!metaSent){
+                emit(buildMeta());
+                ttft = Date.now() - startTime; // record time to first token
+                metaSent = true;
+            }
+
+            // add this slice's text to the running log and send a text frame
+            text += messageText;
+            emit({token: messageText})
+        }
+
+
     }
 }
 
