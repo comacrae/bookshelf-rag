@@ -4,8 +4,9 @@ import { getGraph } from "@/src/agent/graph";
 import type { WebResult, Source} from "@/src/agent/state";
 import type { Hit } from "@/src/retrieval";
 import { validateCitations } from "@/src/citations";
-import { pool } from "@/src/db";
-import type { Step } from "@/src/trace";
+import { createTrace } from "@/src/trace";
+import type { Node, Step } from "@/src/trace";
+import { saveRequest } from "@/src/requestLog";
 
 const chatRequest = z.object({
     conversationId:z.string().min(1), 
@@ -36,20 +37,17 @@ async function runChat(input:ChatInput, emit:(f:Frame)=>void){
     let text: string = "";
     let ttft: number | null = null; // time to first token
     let metaSent: boolean = false; // has the meta frame gone out yet
-    let inputTokens: number = 0; // running total counter
-    let outputTokens: number = 0; // running total counter
     let tavilyCounter: number = 0; // track number of tavily runs
-    let steps:Step[] = [];
-    let lastStepTime = startTime;
-    let lastInputTokenTotal = 0;
-    let lastOutputTokenTotal = 0;
+    const trace = createTrace(startTime); // per-node steps and token totals
     const graph = await getGraph();
 
 
     const hooks = [{
         handleLLMEnd(out:any){
-            inputTokens += out.llmOutput?.tokenUsage.promptTokens ?? 0;
-            outputTokens += out.llmOutput?.tokenUsage.completionTokens ?? 0;
+            trace.addTokens(
+                out.llmOutput?.tokenUsage?.promptTokens ?? 0,
+                out.llmOutput?.tokenUsage?.completionTokens ?? 0
+            );
         }
     }];
 
@@ -77,24 +75,6 @@ async function runChat(input:ChatInput, emit:(f:Frame)=>void){
         }
     };
 
-    const buildDetails = (node:Node, update:Record<string,any>): Record<string,any>  => {
-        if(node==="rewrite"){
-            return {rewritten: update.rewritten}
-        }else if (node === "grade"){
-            const u = update as {relevant:boolean, gradeReason:string, attempts:number};
-            return {relevant: u.relevant, reason:u.gradeReason}
-        }else if (node === "answer"){
-            return {source: update.source}
-        }else if (node === "webSearch"){
-            const u = update as {webResults: WebResult[]};
-            return {urls: u.webResults.map(r => r.url)};
-        }else if (node === "retrieve"){
-            return {chunks:update.chunks}
-        }else{
-            throw new Error(`Invalid node type ${node}`);
-        }
-    };
-
     try{
         const events = await graph.stream(
             {question, attempts:0, webResults:[]},
@@ -110,12 +90,9 @@ async function runChat(input:ChatInput, emit:(f:Frame)=>void){
         // one run of this loop per node execution
         for await (const [mode, payload] of events){
             if(mode === "updates"){
-                const [nodeName, update] = Object.entries(payload)[0] as [string,any];
+                const [nodeName, update] = Object.entries(payload)[0] as [Node,any];
 
-                // determine current attempt number for mid-turn updates
-                const attemptNumber = nodeName === "answer" ? update.attempts : nodeName === "rewrite" ? attempts + 1 : attempts; 
-
-                // extract the update information to populate the stream
+                // keep what the meta frame and the requests row need
                 if(nodeName === "retrieve")
                     chunks = update.chunks;
                 else if (nodeName === "webSearch"){
@@ -128,16 +105,7 @@ async function runChat(input:ChatInput, emit:(f:Frame)=>void){
                     source = update.source;
                 }
 
-                //push the step into the sequence array to get mid-turn updates
-                const newStep = {seq: steps.length + 1, 
-                    node:nodeName as Node, 
-                    attempt: attemptNumber, 
-                    inTok: inputTokens - lastInputTokenTotal, 
-                    outTok: outputTokens - lastOutputTokenTotal,
-                    ms: Date.now() - lastStepTime
-                  };
-                  // update step counters
-                  lastInputTokenTotal
+                trace.onUpdate(nodeName, update);
             }else if(mode === "messages"){
                 const [msg, meta] = payload;
                 if(meta.langgraph_node != "answer" || msg.type != "ai")
@@ -164,24 +132,24 @@ async function runChat(input:ChatInput, emit:(f:Frame)=>void){
         const webIds:string[] = webResults.map((_,i) =>`w${i+1}`);
 
         const {invalid} = validateCitations(text,chunkIds,webIds);
-        emit({done:true, invalid, steps});
+        emit({done:true, invalid, steps: trace.getSteps()});
 
-        
         const elapsed = Date.now() - startTime;
-        await pool.query(`
-            insert into requests (conversation_id, question, input_tokens, output_tokens, attempts, latency_ms, ttft_ms, web_calls, invalid_citations, source, chat_model,status)
-            values
-            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            `,[conversationId,question,inputTokens,outputTokens,attempts,elapsed,ttft ?? elapsed, tavilyCounter,invalid.length,source,process.env.CHAT_MODEL, "ok"]);
+        await saveRequest({
+            conversationId, question, ...trace.getTotals(), attempts,
+            latencyMs: elapsed, ttftMs: ttft ?? elapsed, webCalls: tavilyCounter,
+            invalidCitations: invalid.length, source, chatModel: process.env.CHAT_MODEL,
+            status: "ok", errorMessage: null
+        }, trace.getSteps());
     }catch(err){
         const elapsed = Date.now() - startTime;
-        const reason = err instanceof Error ? err.message : String(err);
-        await pool.query(`
-            insert into requests (conversation_id, question, input_tokens, output_tokens, attempts, latency_ms, ttft_ms, web_calls, invalid_citations, source, chat_model,status, error_message)
-            values
-            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,$13)
-            `,[conversationId,question,inputTokens,outputTokens,attempts,elapsed,ttft ?? elapsed, tavilyCounter,0,source,process.env.CHAT_MODEL, "error", reason]);
-            throw err;
+        await saveRequest({
+            conversationId, question, ...trace.getTotals(), attempts,
+            latencyMs: elapsed, ttftMs: ttft ?? elapsed, webCalls: tavilyCounter,
+            invalidCitations: 0, source, chatModel: process.env.CHAT_MODEL,
+            status: "error", errorMessage: err instanceof Error ? err.message : String(err)
+        }, trace.getSteps());
+        throw err;
     }
 }
 
