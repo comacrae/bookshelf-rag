@@ -5,6 +5,7 @@ import type { WebResult, Source} from "@/src/agent/state";
 import type { Hit } from "@/src/retrieval";
 import { validateCitations } from "@/src/citations";
 import { pool } from "@/src/db";
+import type { Step } from "@/src/trace";
 
 const chatRequest = z.object({
     conversationId:z.string().min(1), 
@@ -15,8 +16,6 @@ const chatRequest = z.object({
 type ChatInput = {conversationId: string, question:string, webFallback:boolean, topK:number};
 type MetaChunk = { n: number; book: string; page: number; pageEnd: number; content: string };
 type MetaWeb   = { n: string; url: string; title: string };          // n is "w1", "w2"...
-type Node = "rewrite" | "answer" | "webSearch" | "grade" | "retrieve";
-type Step = {seq:number, node:Node, attempt:number, inTok:number,outTok:number, ms:number, detail:Record<string,unknown>}
 export type Frame =
   | { meta: { source: Source; chunks: MetaChunk[]; web: MetaWeb[] } }    // sent once, first
   | { token: string }                                                    // sent many times
