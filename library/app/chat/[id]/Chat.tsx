@@ -5,7 +5,9 @@ import type { Source } from "@/src/agent/state";
 import type { Step } from "@/src/trace";
 import { useState } from "react";
 
-import {Container, Stack, Paper, Text, Loader, Group, Textarea, Button} from "@mantine/core";
+import { RewriteResult, AnswerResult, GradeResult, RetrieveResult, WebSearchResult } from "@/src/trace";
+
+import {Container, Stack, Paper, Text, Loader, Group, Textarea, Button, Badge} from "@mantine/core";
 
 type Turn = {
     question:string,
@@ -19,10 +21,47 @@ type Turn = {
     pending:boolean
 }
 
+const SourceBadge = (source:Source) => {
+    const COLORS: Record<Source, {color:string, label:string}> = {
+        books: {color:"teal",label:"book"},
+        web: {color:"orange",label:"web"},
+        none: {color:"grey",label:"no source"}
+    }
+    const src = COLORS[source];
+    return (
+        <Badge color={src.color}>{src.label}</Badge>
+    )
+}
+
+const summarize = (step:Step):string => {
+    let detail = null;
+    switch(step.node){
+        case "retrieve":
+            detail = step.detail as RetrieveResult;
+            return `${detail.chunks.length} chunks retrieved`;
+        case 'rewrite':
+            detail = step.detail as RewriteResult;
+            return `rewrote to ${detail.rewritten}`;
+        case 'grade':
+            detail = step.detail as GradeResult;
+            return detail.relevant ? `${detail.relevant}` : `not relevant: ${detail.gradeReason}`;
+        case 'answer':
+            detail = step.detail as AnswerResult;
+            return detail.source === "none" ? `no answer found` : `answered from the ${detail.source}`;
+        case 'webSearch':
+            detail = step.detail as WebSearchResult;
+            return `${detail.webResults.length} web results`;
+        default:
+            return '';
+    }
+};
+
+
 export const Chat = () => {
     const {id} = useParams<{id:string}>();
     const [turns, setTurns] = useState<Turn[]>([]);
-    const [input, setInput] = useState("");
+    const [input, setInput] = useState<string>("");
+    const [selected, setSelected] = useState<MetaChunk|null>(null);
     
     // if busy, return early
         // turns.at(-1) is undefined if turns is empty, so it would return false
