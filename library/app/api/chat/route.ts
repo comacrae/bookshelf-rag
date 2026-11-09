@@ -14,9 +14,9 @@ const chatRequest = z.object({
     webFallback:z.boolean().optional(),
     topK:z.number().int().min(1).max(10).optional()
 });
-type ChatInput = {conversationId: string, question:string, webFallback:boolean, topK:number};
-type MetaChunk = { n: number; book: string; page: number; pageEnd: number; content: string };
-type MetaWeb   = { n: string; url: string; title: string };          // n is "w1", "w2"...
+export type ChatInput = {conversationId: string, question:string, webFallback:boolean, topK:number};
+export type MetaChunk = { n: number; book: string; page: number; pageEnd: number; content: string };
+export type MetaWeb   = { n: string; url: string; title: string };          // n is "w1", "w2"...
 export type Frame =
   | { meta: { source: Source; chunks: MetaChunk[]; web: MetaWeb[] } }    // sent once, first
   | { token: string }                                                    // sent many times
