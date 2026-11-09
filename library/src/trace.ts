@@ -1,10 +1,10 @@
 import type { rewrite, grade, answer, webSearch, retrieve } from "./agent/nodes";
 
-export type RewriteResult = Awaited<ReturnType<typeof rewrite>>;
-export type GradeResult = Awaited<ReturnType<typeof grade>>;
-export type AnswerResult = Awaited<ReturnType<typeof answer>>;
-export type WebSearchResult = Awaited<ReturnType<typeof webSearch>>
-export type RetrieveResult = Awaited<ReturnType<typeof retrieve>>
+type RewriteResult = Awaited<ReturnType<typeof rewrite>>;
+type GradeResult = Awaited<ReturnType<typeof grade>>;
+type AnswerResult = Awaited<ReturnType<typeof answer>>;
+type WebSearchResult = Awaited<ReturnType<typeof webSearch>>
+type RetrieveResult = Awaited<ReturnType<typeof retrieve>>
 
 export type Step = {seq:number, node:Node, attempt:number, inputTokens:number,outputTokens:number, ms:number, detail:Record<string,unknown>}
 export type Node = "rewrite" | "answer" | "webSearch" | "grade" | "retrieve";

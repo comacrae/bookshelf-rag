@@ -5,9 +5,8 @@ import type { Source } from "@/src/agent/state";
 import type { Step } from "@/src/trace";
 import { useState } from "react";
 
-import { RewriteResult, AnswerResult, GradeResult, RetrieveResult, WebSearchResult } from "@/src/trace";
 
-import {Container, Stack, Paper, Text, Loader, Group, Textarea, Button, Badge} from "@mantine/core";
+import {Container, Stack, Paper, Text, Loader, Group, Textarea, Button, Badge, Anchor, Accordion, Timeline} from "@mantine/core";
 
 type Turn = {
     question:string,
@@ -21,12 +20,14 @@ type Turn = {
     pending:boolean
 }
 
-const SourceBadge = (source:Source) => {
-    const COLORS: Record<Source, {color:string, label:string}> = {
-        books: {color:"teal",label:"book"},
-        web: {color:"orange",label:"web"},
-        none: {color:"grey",label:"no source"}
-    }
+const COLORS: Record<Source, {color:string, label:string}> = {
+    books: {color:"teal",label:"book"},
+    web: {color:"orange",label:"web"},
+    none: {color:"gray",label:"no source"}
+}
+
+const SourceBadge = ({source}:{source:Source}) => {
+    
     const src = COLORS[source];
     return (
         <Badge color={src.color}>{src.label}</Badge>
@@ -34,23 +35,17 @@ const SourceBadge = (source:Source) => {
 }
 
 const summarize = (step:Step):string => {
-    let detail = null;
     switch(step.node){
         case "retrieve":
-            detail = step.detail as RetrieveResult;
-            return `${detail.chunks.length} chunks retrieved`;
+            return `${(step.detail.chunks as string[]).length} chunks retrieved`;
         case 'rewrite':
-            detail = step.detail as RewriteResult;
-            return `rewrote to ${detail.rewritten}`;
+            return `rewrote to "${step.detail.rewritten}"`;
         case 'grade':
-            detail = step.detail as GradeResult;
-            return detail.relevant ? `${detail.relevant}` : `not relevant: ${detail.gradeReason}`;
+            return step.detail.relevant ? `relevant` : `not relevant: ${step.detail.reason}`;
         case 'answer':
-            detail = step.detail as AnswerResult;
-            return detail.source === "none" ? `no answer found` : `answered from the ${detail.source}`;
+            return step.detail.source === "none" ? `no answer found` : `answered from the ${step.detail.source}`;
         case 'webSearch':
-            detail = step.detail as WebSearchResult;
-            return `${detail.webResults.length} web results`;
+            return `${(step.detail.urls as string[]).length} web results`;
         default:
             return '';
     }
@@ -61,7 +56,7 @@ export const Chat = () => {
     const {id} = useParams<{id:string}>();
     const [turns, setTurns] = useState<Turn[]>([]);
     const [input, setInput] = useState<string>("");
-    const [selected, setSelected] = useState<MetaChunk|null>(null);
+    const [selected, setSelected] = useState<MetaChunk|MetaWeb |null>(null);
     
     // if busy, return early
         // turns.at(-1) is undefined if turns is empty, so it would return false
@@ -80,6 +75,43 @@ export const Chat = () => {
         }else if("error" in f){
             updateLastTurn(t => ({...t, error: f.error, pending: false}))
         }
+    }
+
+    const renderAnswer = (t:Turn) => {
+        /*
+        * Renders text or hyperlinked text anchored to citation
+        */
+
+        // split answer with citation regex capturing citations
+        const matchCitation = /(\[w?\d+\])/g; // match [w1] or [1]
+
+        const peices = t.answer.split(matchCitation);
+
+        //for each piece split on citations
+        return peices.map((p,i)=>{
+            if((!/^\[\w+\]$/.test(p))) // if not a citation like [w1] or [1]
+                return p; // it's regular text; just return as is
+
+            const citation = p.slice(1,-1); // remove start and end square brackets
+
+            if(t.invalid.includes(citation))
+                return null; // skip invalid citations 
+
+            if(citation.includes('w')){ // if a web id
+                const site = t.web.find(w => w.n === citation)
+                if(site){
+                    return <Anchor key={i} component="button" onClick={()=>setSelected(site)}>{citation}</Anchor>
+                }
+            }
+
+            const parsedChunkId = Number.parseInt(citation);
+            const chunk = t.chunks.find(ch => ch.n === parsedChunkId);
+            if(chunk){
+                return <Anchor key={i} component="button" onClick={()=>setSelected(chunk)}>{citation}</Anchor>
+            }
+
+            return p; // fallback for nothing matching; just return the text as is
+        })
     }
 
     const send = async (e:React.SubmitEvent<HTMLFormElement>) => {
@@ -160,8 +192,28 @@ export const Chat = () => {
                 {turns.map((t,i)=>(
                     <Paper key={i} withBorder p="md">
                         <Text fw={600}>{t.question}</Text>
+                        {t.source && <SourceBadge source={t.source}/>} 
                         {t.pending && t.answer === "" ? <Loader/> : <Text style={{whiteSpace:"pre-wrap"}}>{t.answer}</Text>}
                         {t.error && <Text c="red">{t.error}</Text>}
+                        {t.steps.length > 0 && (
+                            <Accordion>
+                            <Accordion.Item value="log">
+                                <Accordion.Control>Response Log</Accordion.Control>
+                                <Accordion.Panel>
+                                    <Timeline bulletSize={14} lineWidth={2}>
+                                        {t.steps.map((s)=>
+                                            <Timeline.Item 
+                                            key={s.seq} 
+                                            title={`${s.node} #${s.attempt}`} >
+                                                <Text size="sm">{renderAnswer(t)}</Text>
+                                                <Text size="xs" c="dimmed">{s.ms}</Text>
+                                            </Timeline.Item>
+                                        )}
+                                    </Timeline>
+                                </Accordion.Panel>
+                            </Accordion.Item>
+                            </Accordion>
+                        )}
                     </Paper>
                 ))}
             </Stack>
