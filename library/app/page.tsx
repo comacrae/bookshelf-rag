@@ -1,10 +1,10 @@
 import { redirect } from "next/navigation"
 import { randomUUID } from "crypto";
 import { connection } from "next/server";
-import { Button, Loader } from "@mantine/core";
+import { Loader } from "@mantine/core";
 import { Suspense } from "react";
 
-export const NewConversation = async () => {
+const NewConversation = async () => {
   await connection(); // ensures that we don't bake the convo uuid into build time by waiting for a real request
   const uuid = randomUUID();
   redirect(`/chat/${uuid}`);

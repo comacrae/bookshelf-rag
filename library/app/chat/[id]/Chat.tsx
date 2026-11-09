@@ -35,5 +35,79 @@ export const Chat = () => {
             updateLastTurn(t => ({...t, error: f.error, pending: false}))
         }
     }
+
+    const submitQuestion = async (e:React.SubmitEvent<HTMLFormElement>) => {
+        e.preventDefault(); // dont let form wipe out state by reloading page
+        const question = input.trim();
+
+        // if busy, return early
+        // turns.at(-1) is undefined if turns is empty, so it would return false
+        const busy = turns.at(-1)?.pending ?? false;
+
+        if(busy || question.length === 0) 
+            return;
+
+        // init turn
+        setTurns(prev => [...prev, {
+            question,
+            answer:"",
+            source:null,
+            chunks:[],
+            web:[],
+            invalid:[],
+            steps:[],
+            error:null,
+            pending:true
+        }])
+
+        setInput(""); // clear question input box
+
+        
+
+        const payload = {
+            conversationId: id,
+            question,
+        }
+        // fetch response
+        try{
+            const res = await fetch("/api/chat",
+                {
+                    method:'post',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+            // if 400 error, return
+            if(!res.ok){
+                const result = await res.json();
+                updateLastTurn((t) => ({...t, error:result.error}));
+                return
+            }
+
+            const reader = res.body!.getReader(); // stream reader
+            const decoder = new TextDecoder(); // convert bytes to utf-8
+            let buffer = "";
+            let {value, done} = await reader.read();
+            // read stream as it comes in
+            while(!done){
+                // fill in token buffer
+                buffer += decoder.decode(value, {stream:true});
+                // split by new line
+                const lines = buffer.split("\n"); // jsonnd input format
+                buffer = lines.pop() ?? ""; // if theres an unfinshed line, assign to buffer
+                for(const line of lines)
+                    applyFrame(JSON.parse(line) as Frame);
+                ({value,done} = await reader.read());
+            }
+        }catch(err){
+            const e = err as Error;
+            updateLastTurn((t) => ({...t, error:e.message}));
+
+        }finally{
+            updateLastTurn((t) => ({...t, pending:false})); // always end the loop
+        }
+    }
     return <div>{id}</div>
 }
