@@ -12,7 +12,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
 
     <html lang="en"  {...mantineHtmlProps}>
       <head><ColorSchemeScript/></head>
-     <body> <MantineProvider>{children}</MantineProvider></body>
+     <body><MantineProvider>{children}</MantineProvider></body>
     </html>
   );
 }

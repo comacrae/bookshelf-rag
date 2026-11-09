@@ -1,9 +1,11 @@
 "use client";
 import { useParams } from "next/navigation"
-import type { Frame, MetaChunk, MetaWeb, ChatInput } from "@/app/api/chat/route";
+import type { Frame, MetaChunk, MetaWeb } from "@/app/api/chat/route";
 import type { Source } from "@/src/agent/state";
 import type { Step } from "@/src/trace";
 import { useState } from "react";
+
+import {Container, Stack, Paper, Text, Loader, Group, Textarea, Button} from "@mantine/core";
 
 type Turn = {
     question:string,
@@ -21,6 +23,11 @@ export const Chat = () => {
     const {id} = useParams<{id:string}>();
     const [turns, setTurns] = useState<Turn[]>([]);
     const [input, setInput] = useState("");
+    
+    // if busy, return early
+        // turns.at(-1) is undefined if turns is empty, so it would return false
+    const busy = turns.at(-1)?.pending ?? false;
+
     // helper to update the last turn using the given function
     const updateLastTurn = (fn:(t:Turn) => Turn) => setTurns(prev => prev.map((t,i) => i === prev.length - 1? fn(t) : t));
     const applyFrame  = (f:Frame) => {
@@ -36,13 +43,11 @@ export const Chat = () => {
         }
     }
 
-    const submitQuestion = async (e:React.SubmitEvent<HTMLFormElement>) => {
+    const send = async (e:React.SubmitEvent<HTMLFormElement>) => {
         e.preventDefault(); // dont let form wipe out state by reloading page
         const question = input.trim();
 
-        // if busy, return early
-        // turns.at(-1) is undefined if turns is empty, so it would return false
-        const busy = turns.at(-1)?.pending ?? false;
+        
 
         if(busy || question.length === 0) 
             return;
@@ -109,5 +114,26 @@ export const Chat = () => {
             updateLastTurn((t) => ({...t, pending:false})); // always end the loop
         }
     }
-    return <div>{id}</div>
+    
+    return (
+        <Container size="md" py="xl">
+            <Stack gap="md">
+                {turns.map((t,i)=>(
+                    <Paper key={i} withBorder p="md">
+                        <Text fw={600}>{t.question}</Text>
+                        {t.pending && t.answer === "" ? <Loader/> : <Text style={{whiteSpace:"pre-wrap"}}>{t.answer}</Text>}
+                        {t.error && <Text c="red">{t.error}</Text>}
+                    </Paper>
+                ))}
+            </Stack>
+            <form onSubmit={send} >
+                <Group align="flex-end" mt="md">
+                    <Textarea style={{flex:1}} autosize minRows={2} disabled={busy} value={input} onChange={(e) => setInput(e.currentTarget.value)}>
+
+                    </Textarea>
+                    <Button type="submit" loading={busy}>Ask</Button>
+                </Group>
+            </form>
+        </Container>
+    )
 }
