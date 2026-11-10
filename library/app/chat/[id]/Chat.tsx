@@ -6,7 +6,7 @@ import type { Step } from "@/src/trace";
 import { useState } from "react";
 
 
-import {Container, Stack, Paper, Text, Loader, Group, Textarea, Button, Badge, Anchor, Accordion, Timeline} from "@mantine/core";
+import {Container, Stack, Paper, Text, Loader, Group, Textarea, Button, Badge, Anchor, Accordion, Timeline, Drawer, List} from "@mantine/core";
 
 type Turn = {
     question:string,
@@ -37,7 +37,7 @@ const SourceBadge = ({source}:{source:Source}) => {
 const summarize = (step:Step):string => {
     switch(step.node){
         case "retrieve":
-            return `${(step.detail.chunks as string[]).length} chunks retrieved`;
+            return `${(step.detail.chunkIds as string[]).length} chunks retrieved`;
         case 'rewrite':
             return `rewrote to "${step.detail.rewritten}"`;
         case 'grade':
@@ -56,7 +56,7 @@ export const Chat = () => {
     const {id} = useParams<{id:string}>();
     const [turns, setTurns] = useState<Turn[]>([]);
     const [input, setInput] = useState<string>("");
-    const [selected, setSelected] = useState<MetaChunk|MetaWeb |null>(null);
+    const [selected, setSelected] = useState<MetaChunk |null>(null);
     
     // if busy, return early
         // turns.at(-1) is undefined if turns is empty, so it would return false
@@ -100,14 +100,14 @@ export const Chat = () => {
             if(citation.includes('w')){ // if a web id
                 const site = t.web.find(w => w.n === citation)
                 if(site){
-                    return <Anchor key={i} component="button" onClick={()=>setSelected(site)}>{citation}</Anchor>
+                    return <Anchor key={i} href={site.url} target="_blank" rel="noreferrer">{`[${citation}]`}</Anchor>
                 }
             }
 
             const parsedChunkId = Number.parseInt(citation);
             const chunk = t.chunks.find(ch => ch.n === parsedChunkId);
             if(chunk){
-                return <Anchor key={i} component="button" onClick={()=>setSelected(chunk)}>{citation}</Anchor>
+                return <Anchor key={i} component="button" onClick={()=>setSelected(chunk)}>{`[${citation}]`}</Anchor>
             }
 
             return p; // fallback for nothing matching; just return the text as is
@@ -189,24 +189,39 @@ export const Chat = () => {
     return (
         <Container size="md" py="xl">
             <Stack gap="md">
+                <Text size="xl" fw={800}>
+                    Ask a question
+                </Text>
+                <Text size="lg">
+                   Ask a question about git, javascript, data structs/algorithms, or operating systems. The chatbot will
+                   attempt to answer you by pulling the top N most relevant chunks from a selection of pre-scraped books.
+                   If it can't find the answer and web search is active, it will find you an answer from the web. 
+                </Text>
+                <Text fw={600}>Books</Text>
+<List size="sm">
+    <List.Item>Algorithms by Jeff Erickson</List.Item>
+    <List.Item>Operating Systems: Three Easy Pieces by Remzi H. Arpaci-Dusseau and Andrea C. Arpaci-Dusseau</List.Item>
+    <List.Item>Eloquent JavaScript, 4th edition by Marijn Haverbeke</List.Item>
+    <List.Item>Pro Git, 2nd edition by Scott Chacon and Ben Straub</List.Item>
+</List>
                 {turns.map((t,i)=>(
                     <Paper key={i} withBorder p="md">
                         <Text fw={600}>{t.question}</Text>
                         {t.source && <SourceBadge source={t.source}/>} 
-                        {t.pending && t.answer === "" ? <Loader/> : <Text style={{whiteSpace:"pre-wrap"}}>{t.answer}</Text>}
+                        {t.pending && t.answer === "" ? <Loader/> : <Text style={{whiteSpace:"pre-wrap"}}>{renderAnswer(t)}</Text>}
                         {t.error && <Text c="red">{t.error}</Text>}
                         {t.steps.length > 0 && (
                             <Accordion>
                             <Accordion.Item value="log">
-                                <Accordion.Control>Response Log</Accordion.Control>
+                                <Accordion.Control>How this answer was reached</Accordion.Control>
                                 <Accordion.Panel>
                                     <Timeline bulletSize={14} lineWidth={2}>
                                         {t.steps.map((s)=>
                                             <Timeline.Item 
                                             key={s.seq} 
-                                            title={`${s.node} #${s.attempt}`} >
-                                                <Text size="sm">{renderAnswer(t)}</Text>
-                                                <Text size="xs" c="dimmed">{s.ms}</Text>
+                                            title={`Attempt #${s.attempt}: ${s.node} node`} >
+                                                <Text size="sm">{summarize(s)}</Text>
+                                                <Text size="xs" c="dimmed">{s.ms} ms</Text>
                                             </Timeline.Item>
                                         )}
                                     </Timeline>
@@ -217,6 +232,13 @@ export const Chat = () => {
                     </Paper>
                 ))}
             </Stack>
+            <Drawer opened={selected !== null} onClose={()=>setSelected(null)} position="right" size="lg" title={`Citation [${selected?.n}]`}>
+                {selected && 
+                    <>
+                       <Text fw={600}>{selected.page === selected.pageEnd ?`${selected.book} p. ${selected.page}` :`${selected.book}  p. ${selected.page}-${selected.pageEnd}`}</Text>
+                        <Text style={{whiteSpace:"pre-wrap"}}>{selected.content}</Text>
+                    </>}
+            </Drawer>
             <form onSubmit={send} >
                 <Group align="flex-end" mt="md">
                     <Textarea style={{flex:1}} autosize minRows={2} disabled={busy} value={input} onChange={(e) => setInput(e.currentTarget.value)}>
