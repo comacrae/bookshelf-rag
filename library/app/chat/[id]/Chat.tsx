@@ -3,22 +3,13 @@ import { useParams } from "next/navigation"
 import type { Frame, MetaChunk, MetaWeb } from "@/app/api/chat/route";
 import type { Source } from "@/src/agent/state";
 import type { Step } from "@/src/trace";
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import type {Turn, HistoryTurn} from "@/src/history";
 
 
 import {Container, Stack, Paper, Text, Loader, Group, Textarea, Button, Badge, Anchor, Accordion, Timeline, Drawer, List} from "@mantine/core";
 
-type Turn = {
-    question:string,
-    answer:string,
-    source: Source | null,
-    chunks:MetaChunk[],
-    web: MetaWeb[],
-    invalid:string[],
-    steps:Step[],
-    error:string|null,
-    pending:boolean
-}
+
 
 const COLORS: Record<Source, {color:string, label:string}> = {
     books: {color:"teal",label:"book"},
@@ -57,6 +48,17 @@ export const Chat = () => {
     const [turns, setTurns] = useState<Turn[]>([]);
     const [input, setInput] = useState<string>("");
     const [selected, setSelected] = useState<MetaChunk |null>(null);
+
+    useEffect(() => {
+        // load chat history if it exists
+        const load = async () => {
+            const res = await fetch(`/api/chat?conversationId=${id}`);
+            if (!res.ok) return;                          // no history is fine; the page just starts empty
+            const { turns: saved } = await res.json() as { turns: HistoryTurn[] };
+            // keep prev if the user already asked something before history arrived
+            setTurns(prev => prev.length ? prev : saved.map(t => ({ ...t, error: null, pending: false })));        };
+        load();
+    }, [id]); 
     
     // if busy, return early
         // turns.at(-1) is undefined if turns is empty, so it would return false
