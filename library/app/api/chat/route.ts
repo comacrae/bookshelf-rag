@@ -7,6 +7,7 @@ import { validateCitations } from "@/src/citations";
 import { createTrace } from "@/src/trace";
 import type { Node, Step } from "@/src/trace";
 import { saveRequest } from "@/src/requestLog";
+import { loadHistory } from "@/src/history";
 
 const chatRequest = z.object({
     conversationId:z.string().min(1), 
@@ -191,4 +192,15 @@ export async function POST(req:Request){
 
     return new Response(resBody, {headers: {"Content-Type": "application/x-ndjson"}});
 };
+
+export async function GET(req:Request){
+    const conversationId = new URL(req.url).searchParams.get("conversationId");
+
+    if(!conversationId)
+        return Response.json({error: "Conversation id missing from request"},{status:400});
+
+    const history = await loadHistory(conversationId);
+    return Response.json({turns:history});
+
+}
 

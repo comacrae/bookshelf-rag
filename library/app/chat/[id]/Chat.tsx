@@ -4,21 +4,12 @@ import type { Frame, MetaChunk, MetaWeb } from "@/app/api/chat/route";
 import type { Source } from "@/src/agent/state";
 import type { Step } from "@/src/trace";
 import { useState } from "react";
+import type {Turn} from "@/src/history";
 
 
 import {Container, Stack, Paper, Text, Loader, Group, Textarea, Button, Badge, Anchor, Accordion, Timeline, Drawer, List} from "@mantine/core";
 
-type Turn = {
-    question:string,
-    answer:string,
-    source: Source | null,
-    chunks:MetaChunk[],
-    web: MetaWeb[],
-    invalid:string[],
-    steps:Step[],
-    error:string|null,
-    pending:boolean
-}
+
 
 const COLORS: Record<Source, {color:string, label:string}> = {
     books: {color:"teal",label:"book"},
